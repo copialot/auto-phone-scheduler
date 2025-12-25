@@ -13,7 +13,11 @@ import {
 } from '@yume-chan/scrcpy-decoder-webcodecs'
 
 // Socket.IO 服务器地址
-const SOCKET_URL = import.meta.env.VITE_API_URL?.replace('/api', '') || 'http://localhost:8000'
+// 在 Docker 环境中通过 nginx 代理时使用相对路径（空字符串）
+// 本地开发时使用 localhost:8000
+const SOCKET_URL = import.meta.env.VITE_API_URL
+  ? import.meta.env.VITE_API_URL.replace('/api', '') || window.location.origin
+  : 'http://localhost:8000'
 
 interface ScrcpyPlayerProps {
   deviceId: string

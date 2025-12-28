@@ -10,9 +10,13 @@ An automated phone task scheduling system based on Open-AutoGLM, letting AI cont
 
 ## Features
 
+- **Multi-Device Management** - Manage multiple Android devices simultaneously, set a global default device, and assign tasks to specific devices
+- **WiFi Wireless Connection** - Connect Android devices via WiFi, no USB cable required
+- **Auto Wake & Unlock** - Automatically wake up screen and unlock device before task execution for true unattended operation
+- **Real-time Debug Console** - Live screen mirroring with touch/swipe gesture support and quick controls (Home, Back, App Switch)
 - **Smart Prompt Configuration** - Configure device-specific system prompts to optimize AI execution efficiency
 - **Task Templates & Scheduled Execution** - Preset common task templates with flexible Cron expression scheduling
-- **Complete Execution Records** - Save conversation history and screen recordings for review and debugging
+- **Complete Execution Records** - Save conversation history and screen recordings with seekable progress bar and download support
 - **Multi-Channel Notifications** - Real-time task result notifications via DingTalk, Telegram, and more
 - **Advanced Model Support** - Compatible with Gemini 3 Pro and other models
 - **Optimized Experience** - MonkeyPatch for streaming responses, enhanced app launching via package names
@@ -35,8 +39,8 @@ Daily app check-ins, scheduled attendance, automated browsing tasks, scheduled c
 ### Recording Playback
 ![Recording Playback](docs/images/history.png)
 
-### Web Viewer
-![Web Viewer](docs/images/forum.png)
+### Debug Console
+![Debug Console](docs/images/debug.png)
 
 More features waiting for you to explore!
 

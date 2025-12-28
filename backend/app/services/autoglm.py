@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models.system_prompt import SystemPrompt
+from app.models.app_package import AppPackage
 
 # 回调类型：支持同步或异步回调
 StepCallback = Callable[[dict], Union[None, Awaitable[None]]]
@@ -40,6 +41,32 @@ class AutoGLMService:
             self.model = db_settings["autoglm_model"]
         if db_settings.get("autoglm_max_steps"):
             self.max_steps = int(db_settings["autoglm_max_steps"])
+
+    async def _get_custom_app_packages_prompt(self, db: AsyncSession) -> str:
+        """
+        获取自定义 APP 包名的提示词片段。
+
+        Returns:
+            如果有自定义 APP，返回格式化的提示词；否则返回空字符串
+        """
+        result = await db.execute(select(AppPackage).order_by(AppPackage.app_name))
+        custom_packages = result.scalars().all()
+
+        if not custom_packages:
+            return ""
+
+        # 构建自定义 APP 列表提示词，包含包名信息帮助 AI 理解映射关系
+        app_list = "\n".join(
+            f"- 别名「{pkg.app_name}」= 包名 {pkg.package_name}" for pkg in custom_packages
+        )
+        return f"""# 用户自定义应用别名（重要）
+{app_list}
+
+【必须遵守】当用户提到上述别名时：
+1. 使用 Launch(package="别名") 启动，例如 Launch(package="牛马浏览器")
+2. 启动成功后，屏幕显示的是该包名对应的真实应用界面，这是正确的！
+3. 不要因为界面看起来像其他应用就认为打开错了，别名就是指向那个真实应用
+4. 任务完成后直接 Finish，不要继续寻找"别名"对应的图标"""
 
     async def get_system_prompts(
         self,
@@ -83,6 +110,14 @@ class AutoGLMService:
                     prefix_prompt = prompt.prefix_prompt
                 if prompt.suffix_prompt:
                     suffix_prompt = prompt.suffix_prompt
+
+        # 附加自定义 APP 包名提示词
+        custom_app_prompt = await self._get_custom_app_packages_prompt(db)
+        if custom_app_prompt:
+            if system_prompt:
+                system_prompt = f"{system_prompt}\n\n{custom_app_prompt}"
+            else:
+                system_prompt = custom_app_prompt
 
         return system_prompt, prefix_prompt, suffix_prompt
 
@@ -198,9 +233,18 @@ class AutoGLMService:
                 verbose=True,
             )
 
+            # 自定义回调函数，避免使用默认的 input() 阻塞
+            def auto_confirm_callback(message: str) -> bool:
+                return True  # 默认自动确认
+
+            def noop_takeover_callback(message: str) -> None:
+                pass
+
             agent = PhoneAgent(
                 model_config=model_config,
                 agent_config=agent_config,
+                takeover_callback=noop_takeover_callback,
+                confirmation_callback=auto_confirm_callback,
             )
 
             result = agent.run(command)

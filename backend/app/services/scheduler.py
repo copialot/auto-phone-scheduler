@@ -609,7 +609,9 @@ class SchedulerService:
             base_url = db_settings.get("autoglm_base_url") or settings.autoglm_base_url
             api_key = db_settings.get("autoglm_api_key") or settings.autoglm_api_key
             model = db_settings.get("autoglm_model") or settings.autoglm_model
-            max_steps = int(db_settings.get("autoglm_max_steps") or settings.autoglm_max_steps)
+            # 优先使用任务专属的 max_steps，否则使用全局设置
+            global_max_steps = int(db_settings.get("autoglm_max_steps") or settings.autoglm_max_steps)
+            max_steps = task.max_steps if task.max_steps is not None else global_max_steps
             lang = settings.autoglm_lang
 
             # 获取系统提示词规则
@@ -658,7 +660,21 @@ class SchedulerService:
                         system_prompt=final_system_prompt,
                         verbose=True,
                     )
-                    agent = PhoneAgent(model_config=model_config, agent_config=agent_config)
+
+                    # 自定义回调函数，避免使用默认的 input() 阻塞
+                    # 定时任务默认自动确认敏感操作
+                    def auto_confirm_callback(message: str) -> bool:
+                        return task.auto_confirm_sensitive
+
+                    def noop_takeover_callback(message: str) -> None:
+                        pass
+
+                    agent = PhoneAgent(
+                        model_config=model_config,
+                        agent_config=agent_config,
+                        takeover_callback=noop_takeover_callback,
+                        confirmation_callback=auto_confirm_callback,
+                    )
 
                     try:
                         step_result = agent.step(cmd)
@@ -1007,7 +1023,9 @@ class SchedulerService:
             base_url = db_settings.get("autoglm_base_url") or settings.autoglm_base_url
             api_key = db_settings.get("autoglm_api_key") or settings.autoglm_api_key
             model = db_settings.get("autoglm_model") or settings.autoglm_model
-            max_steps = int(db_settings.get("autoglm_max_steps") or settings.autoglm_max_steps)
+            # 优先使用任务专属的 max_steps，否则使用全局设置
+            global_max_steps = int(db_settings.get("autoglm_max_steps") or settings.autoglm_max_steps)
+            max_steps = task.max_steps if task.max_steps is not None else global_max_steps
             lang = settings.autoglm_lang
 
             # 获取系统提示词规则
@@ -1064,7 +1082,21 @@ class SchedulerService:
                             system_prompt=final_system_prompt,
                             verbose=True,
                         )
-                        agent = PhoneAgent(model_config=model_config, agent_config=agent_config)
+
+                        # 自定义回调函数，避免使用默认的 input() 阻塞
+                        # 定时任务默认自动确认敏感操作
+                        def auto_confirm_callback(message: str) -> bool:
+                            return task.auto_confirm_sensitive
+
+                        def noop_takeover_callback(message: str) -> None:
+                            pass
+
+                        agent = PhoneAgent(
+                            model_config=model_config,
+                            agent_config=agent_config,
+                            takeover_callback=noop_takeover_callback,
+                            confirmation_callback=auto_confirm_callback,
+                        )
 
                         success = False
                         error_msg = None

@@ -22,6 +22,10 @@ from app.services.streaming_model import patch_phone_agent, unpatch_phone_agent
 router = APIRouter(prefix="/api/debug", tags=["debug"])
 settings = get_settings()
 
+# 全局停止事件字典，用于终止调试任务
+# key: device_serial, value: threading.Event
+_debug_stop_events: dict[str, threading.Event] = {}
+
 
 class ExecuteRequest(BaseModel):
     command: str
@@ -89,6 +93,9 @@ async def execute_stream(request: ExecuteRequest, db: AsyncSession = Depends(get
     event_queue: queue.Queue = queue.Queue()
     stop_event = threading.Event()
 
+    # 注册全局停止事件，用于外部终止
+    _debug_stop_events[device_serial] = stop_event
+
     # 当前步骤计数（用于 token 回调）
     current_step_holder = {"step": 0}
 
@@ -134,7 +141,22 @@ async def execute_stream(request: ExecuteRequest, db: AsyncSession = Depends(get
                 system_prompt=final_system_prompt,
                 verbose=True,
             )
-            agent = PhoneAgent(model_config=model_config, agent_config=agent_config)
+
+            # 自定义回调函数，避免使用默认的 input() 阻塞
+            def noop_takeover_callback(message: str) -> None:
+                """空操作回调，takeover 事件由外层逻辑处理"""
+                pass
+
+            def noop_confirmation_callback(message: str) -> bool:
+                """空操作回调，敏感操作确认由外层逻辑处理，默认拒绝"""
+                return False
+
+            agent = PhoneAgent(
+                model_config=model_config,
+                agent_config=agent_config,
+                takeover_callback=noop_takeover_callback,
+                confirmation_callback=noop_confirmation_callback,
+            )
 
             # 发送开始事件
             event_queue.put(("event", {"type": "start", "message": "任务开始执行"}))
@@ -146,6 +168,17 @@ async def execute_stream(request: ExecuteRequest, db: AsyncSession = Depends(get
             step_duration = time.time() - step_start
 
             while True:
+                # 检查是否被终止
+                if stop_event.is_set():
+                    event_queue.put(("event", {
+                        "type": "done",
+                        "message": "任务已被手动终止",
+                        "steps": agent.step_count,
+                        "success": False,
+                        "stopped": True,
+                    }))
+                    break
+
                 # 将 action 转为字符串
                 action_str = ""
                 if step_result.action:
@@ -210,56 +243,33 @@ async def execute_stream(request: ExecuteRequest, db: AsyncSession = Depends(get
                     # 尝试多种格式匹配 message
                     takeover_msg = None
 
-                    # 当 AST 解析失败时，action 会被包装成 finish(message="原始action字符串")
-                    # 所以需要先获取原始的 action 字符串
-                    raw_action_str = action_str
-                    if isinstance(step_result.action, dict) and step_result.action.get('_metadata') == 'finish':
-                        # 从 finish 包装中提取原始 action 字符串
-                        raw_action_str = step_result.action.get('message', '') or action_str
+                    # 优先从字典中直接获取 message（适用于 _metadata: "do" 格式）
+                    if isinstance(step_result.action, dict):
+                        # 格式: {"_metadata": "do", "action": "Take_over", "message": "..."}
+                        if step_result.action.get('action') == 'Take_over':
+                            takeover_msg = step_result.action.get('message', '')
+                        # 格式: {"_metadata": "finish", "message": "原始action字符串"}
+                        elif step_result.action.get('_metadata') == 'finish':
+                            raw_msg = step_result.action.get('message', '')
+                            if raw_msg and 'Take_over' in raw_msg:
+                                inner_match = re.search(r'message\s*=\s*"((?:[^"\\]|\\.)*)"', raw_msg, re.DOTALL)
+                                if inner_match:
+                                    takeover_msg = inner_match.group(1).replace('\\"', '"').strip()
 
-                    # 格式1: message="xxx" 或 message='xxx'（带引号，支持多行，使用 DOTALL）
-                    # 使用贪婪匹配到最后一个引号，处理转义引号
-                    match = re.search(r'message\s*=\s*"((?:[^"\\]|\\.)*)"', raw_action_str, re.DOTALL)
-                    if not match:
-                        match = re.search(r"message\s*=\s*'((?:[^'\\]|\\.)*)'", raw_action_str, re.DOTALL)
-                    if match:
-                        # 去掉转义字符，保留第一行作为简短消息
-                        full_msg = match.group(1).replace('\\"', '"').replace("\\'", "'").strip()
-                        # 处理字面量 \n（两个字符）和真实换行符
-                        if '\\n' in full_msg:
-                            takeover_msg = full_msg.split('\\n')[0]
-                        elif '\n' in full_msg:
-                            takeover_msg = full_msg.split('\n')[0]
-                        else:
-                            takeover_msg = full_msg
+                    # 如果字典中没找到，尝试从字符串解析
+                    if not takeover_msg:
+                        # 格式1: message="xxx" 或 message='xxx'
+                        match = re.search(r'message\s*=\s*"((?:[^"\\]|\\.)*)"', action_str, re.DOTALL)
+                        if not match:
+                            match = re.search(r"message\s*=\s*'((?:[^'\\]|\\.)*)'", action_str, re.DOTALL)
+                        if match:
+                            takeover_msg = match.group(1).replace('\\"', '"').replace("\\'", "'").strip()
 
                     if not takeover_msg:
                         # 格式2: "message": "xxx"（JSON格式）
                         match = re.search(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"', action_str, re.DOTALL)
                         if match:
-                            full_msg = match.group(1).replace('\\"', '"').strip()
-                            if '\\n' in full_msg:
-                                takeover_msg = full_msg.split('\\n')[0]
-                            elif '\n' in full_msg:
-                                takeover_msg = full_msg.split('\n')[0]
-                            else:
-                                takeover_msg = full_msg
-
-                    # 如果还没找到，尝试从 step_result.action 对象中直接获取
-                    if not takeover_msg and isinstance(step_result.action, dict):
-                        full_msg = step_result.action.get('message', '')
-                        if full_msg and 'Take_over' in full_msg:
-                            # message 字段包含原始 action 字符串，再次解析
-                            inner_match = re.search(r'message\s*=\s*"((?:[^"\\]|\\.)*)"', full_msg, re.DOTALL)
-                            if inner_match:
-                                full_msg = inner_match.group(1).replace('\\"', '"').strip()
-                        if full_msg:
-                            if '\\n' in full_msg:
-                                takeover_msg = full_msg.split('\\n')[0]
-                            elif '\n' in full_msg:
-                                takeover_msg = full_msg.split('\n')[0]
-                            else:
-                                takeover_msg = full_msg
+                            takeover_msg = match.group(1).replace('\\"', '"').strip()
 
                     # 默认消息
                     if not takeover_msg:
@@ -297,7 +307,17 @@ async def execute_stream(request: ExecuteRequest, db: AsyncSession = Depends(get
                     }))
                     break
 
-                # 继续下一步
+                # 继续下一步前再次检查是否被终止
+                if stop_event.is_set():
+                    event_queue.put(("event", {
+                        "type": "done",
+                        "message": "任务已被手动终止",
+                        "steps": agent.step_count,
+                        "success": False,
+                        "stopped": True,
+                    }))
+                    break
+
                 current_step_holder["step"] = agent.step_count + 1
                 step_start = time.time()
                 step_result = agent.step()
@@ -310,6 +330,8 @@ async def execute_stream(request: ExecuteRequest, db: AsyncSession = Depends(get
                 agent.reset()
             unpatch_phone_agent(original_client)
             stop_event.set()
+            # 清理全局停止事件
+            _debug_stop_events.pop(device_serial, None)
 
     async def event_generator():
         """异步 SSE 事件生成器"""
@@ -350,3 +372,21 @@ async def execute_stream(request: ExecuteRequest, db: AsyncSession = Depends(get
         },
     )
 
+
+@router.post("/stop/{device_serial}")
+async def stop_debug_execution(device_serial: str):
+    """终止指定设备的调试任务"""
+    stop_event = _debug_stop_events.get(device_serial)
+    if not stop_event:
+        return {"success": False, "message": "没有正在执行的调试任务"}
+
+    stop_event.set()
+    return {"success": True, "message": "已发送终止信号"}
+
+
+@router.get("/status/{device_serial}")
+async def get_debug_status(device_serial: str):
+    """获取指定设备的调试任务状态"""
+    stop_event = _debug_stop_events.get(device_serial)
+    is_running = stop_event is not None and not stop_event.is_set()
+    return {"is_running": is_running}

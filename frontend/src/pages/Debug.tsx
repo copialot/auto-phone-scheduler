@@ -16,8 +16,8 @@ import {
 } from '@/components/ui/alert-dialog'
 import { ScrcpyPlayer } from '@/components/ScrcpyPlayer'
 import { ChatItemCard, type ChatItem, type StepInfo, parseActionToObject } from '@/components/ChatSteps'
-import { devicesApi, settingsApi, deviceConfigsApi } from '@/api/client'
-import { Send, Smartphone, Loader2, AlertTriangle, Bot, Home, ArrowLeft, LayoutGrid, Hand, Unlock, Monitor, Lock, Power, Activity, XCircle } from 'lucide-react'
+import { devicesApi, settingsApi, deviceConfigsApi, debugApi } from '@/api/client'
+import { Send, Smartphone, AlertTriangle, Bot, Home, ArrowLeft, LayoutGrid, Hand, Unlock, Monitor, Lock, Power, Activity, XCircle, Square } from 'lucide-react'
 import { toast } from 'sonner'
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from '@/components/ui/tooltip'
 
@@ -611,6 +611,22 @@ export function Debug() {
     }
   }
 
+  // 终止调试任务
+  const handleStopExecution = async () => {
+    if (!activeDevice) return
+    try {
+      const result = await debugApi.stop(activeDevice.serial)
+      if (result.success) {
+        toast.success('已发送终止信号')
+      } else {
+        toast.info(result.message)
+      }
+    } catch (err) {
+      toast.error('终止失败')
+      console.error('终止调试任务失败:', err)
+    }
+  }
+
   return (
     <TooltipProvider>
     <div className="h-full flex flex-col">
@@ -742,13 +758,28 @@ export function Debug() {
                 className="min-h-15 max-h-30 resize-none"
                 disabled={isExecuting || !activeDevice}
               />
-              <Button
-                onClick={handleSend}
-                disabled={!input.trim() || isExecuting || !activeDevice}
-                className="shrink-0"
-              >
-                {isExecuting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-              </Button>
+              {isExecuting ? (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      onClick={handleStopExecution}
+                      variant="destructive"
+                      className="shrink-0"
+                    >
+                      <Square className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>终止执行</TooltipContent>
+                </Tooltip>
+              ) : (
+                <Button
+                  onClick={handleSend}
+                  disabled={!input.trim() || !activeDevice}
+                  className="shrink-0"
+                >
+                  <Send className="h-4 w-4" />
+                </Button>
+              )}
             </div>
           </div>
         </Card>

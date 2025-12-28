@@ -31,6 +31,8 @@ class Task(Base):
     unlock_before_run: Mapped[bool] = mapped_column(Boolean, default=True)
     # 执行完成后返回主屏幕
     go_home_after_run: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 任务专属最大步数，为空则使用全局设置
+    max_steps: Mapped[int | None] = mapped_column(nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow

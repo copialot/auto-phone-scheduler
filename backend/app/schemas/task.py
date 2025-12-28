@@ -18,6 +18,7 @@ class TaskBase(BaseModel):
     wake_before_run: bool = True  # 执行前唤醒设备
     unlock_before_run: bool = True  # 执行前解锁设备
     go_home_after_run: bool = False  # 执行完成后返回主屏幕
+    max_steps: int | None = None  # 任务专属最大步数，为空则使用全局设置
 
 
 class TaskCreate(TaskBase):
@@ -40,6 +41,7 @@ class TaskUpdate(BaseModel):
     wake_before_run: bool | None = None
     unlock_before_run: bool | None = None
     go_home_after_run: bool | None = None
+    max_steps: int | None = None
 
 
 class TaskResponse(TaskBase):

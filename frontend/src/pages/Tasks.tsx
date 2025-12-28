@@ -374,6 +374,7 @@ function TaskList() {
       wake_before_run: true,
       unlock_before_run: true,
       go_home_after_run: false,
+      max_steps: null,
     })
     setIsDialogOpen(true)
   }
@@ -398,6 +399,7 @@ function TaskList() {
       wake_before_run: true,
       unlock_before_run: true,
       go_home_after_run: false,
+      max_steps: null,
     })
     setIsTemplateDialogOpen(false)
     setIsDialogOpen(true)
@@ -420,6 +422,7 @@ function TaskList() {
       wake_before_run: task.wake_before_run,
       unlock_before_run: task.unlock_before_run,
       go_home_after_run: task.go_home_after_run,
+      max_steps: task.max_steps,
     })
     setIsDialogOpen(true)
   }
@@ -720,6 +723,37 @@ function TaskList() {
                   {formData.random_delay_minutes
                     ? `将在 0~${formData.random_delay_minutes} 分钟内随机执行`
                     : '准时执行'}
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <Label htmlFor="max_steps">最大步数</Label>
+                <span className="text-xs text-muted-foreground">
+                  (留空则使用全局设置)
+                </span>
+              </div>
+              <div className="flex gap-2 items-center">
+                <Input
+                  id="max_steps"
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={formData.max_steps ?? ''}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      max_steps: e.target.value ? parseInt(e.target.value, 10) : null,
+                    })
+                  }
+                  placeholder="使用全局设置"
+                  className="w-32"
+                />
+                <span className="text-sm text-muted-foreground">
+                  {formData.max_steps
+                    ? `最多执行 ${formData.max_steps} 步`
+                    : '使用全局设置'}
                 </span>
               </div>
             </div>

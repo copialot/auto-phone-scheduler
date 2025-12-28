@@ -247,6 +247,22 @@ async def load_custom_app_packages():
             APP_PACKAGES[pkg.app_name] = pkg.package_name
 
 
+def update_app_package_in_memory(app_name: str, package_name: str):
+    """
+    实时更新内存中的 APP_PACKAGES 字典（用于创建/更新时）。
+    """
+    from phone_agent.config.apps import APP_PACKAGES
+    APP_PACKAGES[app_name] = package_name
+
+
+def remove_app_package_from_memory(app_name: str):
+    """
+    从内存中的 APP_PACKAGES 字典移除指定应用（用于删除时）。
+    """
+    from phone_agent.config.apps import APP_PACKAGES
+    APP_PACKAGES.pop(app_name, None)
+
+
 def sync_load_custom_app_packages():
     """
     同步方式加载自定义 APP 包名映射（用于任务执行前调用）。

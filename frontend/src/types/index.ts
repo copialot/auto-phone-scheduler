@@ -15,6 +15,7 @@ export interface Task {
   wake_before_run: boolean  // 执行前唤醒设备
   unlock_before_run: boolean  // 执行前解锁设备
   go_home_after_run: boolean  // 执行完成后返回主屏幕
+  max_steps: number | null  // 任务专属最大步数，为空则使用全局设置
   created_at: string
   updated_at: string
   next_run: string | null
@@ -36,6 +37,7 @@ export interface TaskCreate {
   wake_before_run?: boolean  // 执行前唤醒设备
   unlock_before_run?: boolean  // 执行前解锁设备
   go_home_after_run?: boolean  // 执行完成后返回主屏幕
+  max_steps?: number | null  // 任务专属最大步数，为空则使用全局设置
 }
 
 export interface TaskUpdate {
@@ -53,6 +55,7 @@ export interface TaskUpdate {
   wake_before_run?: boolean
   unlock_before_run?: boolean
   go_home_after_run?: boolean
+  max_steps?: number | null
 }
 
 export type ExecutionStatus = 'pending' | 'running' | 'success' | 'failed'

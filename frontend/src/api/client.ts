@@ -183,3 +183,11 @@ export const deviceConfigsApi = {
   lockScreen: (serial: string) =>
     api.post<{ success: boolean; message: string }>(`/device-configs/${encodeURIComponent(serial)}/lock`).then(r => r.data),
 }
+
+// Debug (调试控制台)
+export const debugApi = {
+  stop: (serial: string) =>
+    api.post<{ success: boolean; message: string }>(`/debug/stop/${encodeURIComponent(serial)}`).then(r => r.data),
+  getStatus: (serial: string) =>
+    api.get<{ is_running: boolean }>(`/debug/status/${encodeURIComponent(serial)}`).then(r => r.data),
+}

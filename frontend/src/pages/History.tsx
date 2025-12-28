@@ -1,8 +1,19 @@
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { executionsApi } from '@/api/client'
 import { formatDateTime } from '@/lib/utils'
 import { Eye, Trash2 } from 'lucide-react'
@@ -10,6 +21,7 @@ import { Eye, Trash2 } from 'lucide-react'
 export function History() {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
+  const [deleteId, setDeleteId] = useState<number | null>(null)
 
   const { data: executions = [], isLoading } = useQuery({
     queryKey: ['executions'],
@@ -20,6 +32,7 @@ export function History() {
     mutationFn: executionsApi.delete,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['executions'] })
+      setDeleteId(null)
     },
   })
 
@@ -92,11 +105,7 @@ export function History() {
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() => {
-                        if (confirm('确定要删除这条记录吗？')) {
-                          deleteMutation.mutate(exec.id)
-                        }
-                      }}
+                      onClick={() => setDeleteId(exec.id)}
                     >
                       <Trash2 className="h-4 w-4" />
                     </Button>
@@ -107,6 +116,27 @@ export function History() {
           ))}
         </div>
       )}
+
+      {/* 删除确认对话框 */}
+      <AlertDialog open={deleteId !== null} onOpenChange={(open) => !open && setDeleteId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认删除</AlertDialogTitle>
+            <AlertDialogDescription>
+              确定要删除这条执行记录吗？此操作无法撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => deleteId && deleteMutation.mutate(deleteId)}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

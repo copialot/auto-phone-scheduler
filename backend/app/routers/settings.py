@@ -15,6 +15,7 @@ class SettingsResponse(BaseModel):
     autoglm_api_key: str | None = None
     autoglm_model: str | None = None
     autoglm_max_steps: int | None = None
+    selected_device: str | None = None  # 用户选择的设备 serial
 
 
 class SettingsUpdate(BaseModel):
@@ -22,6 +23,7 @@ class SettingsUpdate(BaseModel):
     autoglm_api_key: str | None = None
     autoglm_model: str | None = None
     autoglm_max_steps: int | None = None
+    selected_device: str | None = None  # 用户选择的设备 serial
 
 
 SETTINGS_KEYS = [
@@ -29,6 +31,7 @@ SETTINGS_KEYS = [
     "autoglm_api_key",
     "autoglm_model",
     "autoglm_max_steps",
+    "selected_device",
 ]
 
 
@@ -45,6 +48,7 @@ async def get_settings(db: AsyncSession = Depends(get_db)):
         autoglm_api_key=_mask_api_key(settings.get("autoglm_api_key")),
         autoglm_model=settings.get("autoglm_model"),
         autoglm_max_steps=int(settings.get("autoglm_max_steps", 100)),
+        selected_device=settings.get("selected_device"),
     )
 
 

@@ -5,6 +5,7 @@ from app.models.settings import SystemSettings
 from app.models.system_prompt import SystemPrompt
 from app.models.task_template import TaskTemplate
 from app.models.app_package import AppPackage
+from app.models.device_config import DeviceConfig
 
 __all__ = [
     "Task",
@@ -14,4 +15,5 @@ __all__ = [
     "SystemPrompt",
     "TaskTemplate",
     "AppPackage",
+    "DeviceConfig",
 ]

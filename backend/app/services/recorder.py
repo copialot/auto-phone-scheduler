@@ -13,12 +13,13 @@ logger = logging.getLogger(__name__)
 class RecorderService:
     """手机屏幕录制服务"""
 
-    def __init__(self):
+    def __init__(self, device_serial: str | None = None):
         self.recordings_dir = Path(settings.recordings_dir).resolve()
         self.recordings_dir.mkdir(parents=True, exist_ok=True)
         self._recording_process: asyncio.subprocess.Process | None = None
         self._current_file: str | None = None
         self._remote_filename: str | None = None
+        self._device_serial: str | None = device_serial
 
     async def start_recording(self, execution_id: int) -> str:
         """
@@ -47,6 +48,7 @@ class RecorderService:
                 "--bit-rate", "2000000",  # 2 Mbps
                 "--time-limit", "180",  # 3分钟
                 f"/sdcard/{filename}",
+                serial=self._device_serial,
             )
             logger.info(f"[Recorder] screenrecord 进程已启动: PID={self._recording_process.pid}")
         except Exception as e:
@@ -86,11 +88,17 @@ class RecorderService:
         await asyncio.sleep(1.0)
 
         # 从设备拉取录制文件
-        pull_cmd = get_adb_command() + ["pull", f"/sdcard/{self._remote_filename}", self._current_file]
+        pull_cmd = get_adb_command()
+        if self._device_serial:
+            pull_cmd.extend(["-s", self._device_serial])
+        pull_cmd.extend(["pull", f"/sdcard/{self._remote_filename}", self._current_file])
         logger.info(f"[Recorder] 拉取文件: {' '.join(pull_cmd)}")
 
         try:
-            stdout, stderr = await run_adb("pull", f"/sdcard/{self._remote_filename}", self._current_file)
+            stdout, stderr = await run_adb(
+                "pull", f"/sdcard/{self._remote_filename}", self._current_file,
+                serial=self._device_serial,
+            )
             if stderr and b"error" in stderr.lower():
                 logger.error(f"[Recorder] adb pull 失败: {stderr.decode()}")
             else:
@@ -102,7 +110,7 @@ class RecorderService:
 
         # 清理设备上的文件
         try:
-            await run_adb("shell", "rm", "-f", f"/sdcard/{self._remote_filename}")
+            await run_adb("shell", "rm", "-f", f"/sdcard/{self._remote_filename}", serial=self._device_serial)
             logger.info("[Recorder] 设备上的录制文件已清理")
         except Exception as e:
             logger.warning(f"[Recorder] 清理设备文件失败: {e}")

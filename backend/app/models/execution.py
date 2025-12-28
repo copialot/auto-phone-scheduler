@@ -23,5 +23,7 @@ class Execution(Base):
     steps: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     recording_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 实际执行任务的设备 serial
+    device_serial: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     task: Mapped["Task"] = relationship("Task", back_populates="executions")

@@ -15,6 +15,7 @@ from app.routers import (
     task_templates_router,
     debug_router,
     app_packages_router,
+    device_configs_router,
 )
 from app.services.scheduler import SchedulerService
 from app.services.socket_manager import create_socket_app
@@ -67,6 +68,7 @@ app.include_router(system_prompts_router)
 app.include_router(task_templates_router)
 app.include_router(debug_router)
 app.include_router(app_packages_router)
+app.include_router(device_configs_router)
 
 # 静态文件 - 录屏
 app.mount("/recordings", StaticFiles(directory=settings.recordings_dir), name="recordings")

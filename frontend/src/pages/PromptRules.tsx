@@ -17,6 +17,16 @@ import {
   DialogFooter,
   DialogDescription,
 } from '@/components/ui/dialog'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { systemPromptsApi, taskTemplatesApi, devicesApi } from '@/api/client'
 import type { SystemPrompt, SystemPromptCreate, TaskTemplate, TaskTemplateCreate } from '@/types'
 import {
@@ -63,9 +73,12 @@ export function PromptRules() {
     enabled: true,
   })
 
+  const [deletePromptId, setDeletePromptId] = useState<number | null>(null)
+
   // ======== 任务模版状态 ========
   const [isTemplateDialogOpen, setIsTemplateDialogOpen] = useState(false)
   const [editingTemplate, setEditingTemplate] = useState<TaskTemplate | null>(null)
+  const [deleteTemplateId, setDeleteTemplateId] = useState<number | null>(null)
   const [templateFormData, setTemplateFormData] = useState<TaskTemplateCreate>({
     name: '',
     description: '',
@@ -368,11 +381,7 @@ export function PromptRules() {
                         <Button
                           size="sm"
                           variant="outline"
-                          onClick={() => {
-                            if (confirm('确定要删除这个提示词吗？')) {
-                              deletePromptMutation.mutate(prompt.id)
-                            }
-                          }}
+                          onClick={() => setDeletePromptId(prompt.id)}
                         >
                           <Trash2 className="h-4 w-4" />
                         </Button>
@@ -481,11 +490,7 @@ export function PromptRules() {
                           <Button
                             size="sm"
                             variant="outline"
-                            onClick={() => {
-                              if (confirm('确定要删除这个模版吗？')) {
-                                deleteTemplateMutation.mutate(template.id)
-                              }
-                            }}
+                            onClick={() => setDeleteTemplateId(template.id)}
                           >
                             <Trash2 className="h-4 w-4" />
                           </Button>
@@ -778,6 +783,58 @@ export function PromptRules() {
           </form>
         </DialogContent>
       </Dialog>
+
+      {/* 删除提示词确认对话框 */}
+      <AlertDialog open={deletePromptId !== null} onOpenChange={(open) => !open && setDeletePromptId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认删除</AlertDialogTitle>
+            <AlertDialogDescription>
+              确定要删除这个提示词吗？此操作不可撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (deletePromptId !== null) {
+                  deletePromptMutation.mutate(deletePromptId)
+                  setDeletePromptId(null)
+                }
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* 删除模版确认对话框 */}
+      <AlertDialog open={deleteTemplateId !== null} onOpenChange={(open) => !open && setDeleteTemplateId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认删除</AlertDialogTitle>
+            <AlertDialogDescription>
+              确定要删除这个模版吗？此操作不可撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (deleteTemplateId !== null) {
+                  deleteTemplateMutation.mutate(deleteTemplateId)
+                  setDeleteTemplateId(null)
+                }
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

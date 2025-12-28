@@ -9,7 +9,7 @@ import { ScrcpyPlayer } from '@/components/ScrcpyPlayer'
 import { ScreenshotViewer } from '@/components/ScreenshotViewer'
 import { executionsApi, devicesApi } from '@/api/client'
 import { formatDateTime } from '@/lib/utils'
-import { ArrowLeft, Video, MessageSquare, Clock, AlertCircle, Smartphone, Bot } from 'lucide-react'
+import { ArrowLeft, Video, MessageSquare, Clock, AlertCircle, Smartphone, Bot, Download } from 'lucide-react'
 import type { ExecutionStep, Device } from '@/types'
 
 // 流式 token 事件类型
@@ -95,8 +95,8 @@ function convertStepsToChatItems(steps: ExecutionStep[]): ChatItem[] {
       })
     }
 
-    // 添加动作卡片
-    if (action) {
+    // 添加动作卡片（SystemLog 类型不显示动作卡片，只显示消息）
+    if (action && (action.action as string)?.toLowerCase() !== 'systemlog') {
       items.push({
         id: id++,
         type: 'action',
@@ -208,8 +208,14 @@ export function ExecutionDetail() {
     eventSource.addEventListener('step', (event) => {
       const step = JSON.parse(event.data) as ExecutionStep
       setStreamSteps(prev => {
-        // 避免重复添加
-        if (prev.some(s => s.step === step.step)) return prev
+        // 避免重复添加：对于 SystemLog (step=0) 使用 timestamp 判重，其他用 step 判重
+        if (step.step === 0) {
+          // SystemLog 使用 timestamp 判重
+          if (prev.some(s => s.step === 0 && s.timestamp === step.timestamp)) return prev
+        } else {
+          // 普通步骤使用 step 判重
+          if (prev.some(s => s.step === step.step)) return prev
+        }
         return [...prev, step]
       })
       // 清除该步骤的流式状态
@@ -244,15 +250,27 @@ export function ExecutionDetail() {
     refetchInterval: 5000,
   })
 
-  // 获取活跃设备并设置稳定的设备ID
+  // 使用执行记录中的设备 serial 设置稳定的设备ID
   useMemo(() => {
-    const device = devices.find((d: Device) => d.status === 'device')
-    // 首次获取到设备时设置稳定ID
-    if (device && stableDeviceId === null) {
-      // 使用 setTimeout 避免在渲染期间调用 setState
-      setTimeout(() => setStableDeviceId(device.serial), 0)
+    // 优先使用执行记录中保存的设备 serial
+    if (execution?.device_serial && stableDeviceId === null) {
+      // 验证设备是否在线
+      const onlineDevices = devices.filter((d: Device) => d.status === 'device')
+      const targetDevice = onlineDevices.find(d => d.serial === execution.device_serial)
+      if (targetDevice) {
+        setTimeout(() => setStableDeviceId(execution.device_serial!), 0)
+        return
+      }
     }
-  }, [devices, stableDeviceId])
+
+    // 如果执行记录没有设备信息，回退到第一个在线设备
+    if (stableDeviceId === null) {
+      const onlineDevices = devices.filter((d: Device) => d.status === 'device')
+      if (onlineDevices.length > 0) {
+        setTimeout(() => setStableDeviceId(onlineDevices[0].serial), 0)
+      }
+    }
+  }, [devices, execution?.device_serial, stableDeviceId])
 
   // 使用流式步骤或执行记录中的步骤
   const steps = useMemo(() => {
@@ -437,16 +455,33 @@ export function ExecutionDetail() {
         {/* Right Column - Live Stream or Recording */}
         <Card className="flex flex-col min-h-0 h-full overflow-hidden">
           <CardHeader className="pb-3 shrink-0 border-b">
-            <CardTitle className="text-base flex items-center gap-2">
-              <Video className="h-4 w-4" />
-              {isRunning ? '实时屏幕' : '屏幕录像'}
-              {isRunning && (
-                <span className="flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-2 w-2 rounded-full bg-red-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
-                </span>
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Video className="h-4 w-4" />
+                {isRunning ? '实时屏幕' : '屏幕录像'}
+                {isRunning && (
+                  <span className="flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-2 w-2 rounded-full bg-red-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+                  </span>
+                )}
+              </CardTitle>
+              {!isRunning && execution.recording_path && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  asChild
+                >
+                  <a
+                    href={executionsApi.getRecordingUrl(execution.id)}
+                    download={`recording-${execution.id}.mp4`}
+                  >
+                    <Download className="h-4 w-4 mr-1" />
+                    下载
+                  </a>
+                </Button>
               )}
-            </CardTitle>
+            </div>
           </CardHeader>
           <CardContent className="flex-1 flex items-center justify-center p-4 bg-muted/30 overflow-hidden">
             {isRunning ? (

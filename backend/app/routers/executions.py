@@ -2,7 +2,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +13,19 @@ from app.models.execution import Execution, ExecutionStatus
 from app.models.task import Task
 from app.schemas.execution import ExecutionResponse, ExecutionDetail
 from app.services.execution_events import event_bus
+
+
+def send_bytes_range(file_path: Path, start: int, end: int, chunk_size: int = 1024 * 1024):
+    """生成文件的字节范围"""
+    with open(file_path, "rb") as f:
+        f.seek(start)
+        remaining = end - start + 1
+        while remaining > 0:
+            chunk = f.read(min(chunk_size, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
 
 router = APIRouter(prefix="/api/executions", tags=["executions"])
 
@@ -183,8 +196,12 @@ async def stream_execution(execution_id: int, db: AsyncSession = Depends(get_db)
 
 
 @router.get("/{execution_id}/recording")
-async def get_recording(execution_id: int, db: AsyncSession = Depends(get_db)):
-    """获取录屏文件"""
+async def get_recording(
+    execution_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """获取录屏文件（支持 Range 请求以实现进度条拖动）"""
     result = await db.execute(
         select(Execution).where(Execution.id == execution_id)
     )
@@ -199,11 +216,59 @@ async def get_recording(execution_id: int, db: AsyncSession = Depends(get_db)):
     if not filepath.exists():
         raise HTTPException(status_code=404, detail="Recording file not found")
 
-    return FileResponse(
-        filepath,
-        media_type="video/mp4",
-        filename=filepath.name,
-    )
+    file_size = filepath.stat().st_size
+    range_header = request.headers.get("range")
+
+    # 如果没有 Range 请求头，返回完整文件
+    if not range_header:
+        return FileResponse(
+            filepath,
+            media_type="video/mp4",
+            filename=filepath.name,
+            headers={"Accept-Ranges": "bytes"},
+        )
+
+    # 解析 Range 请求头
+    # 格式: bytes=start-end 或 bytes=start-
+    try:
+        range_spec = range_header.replace("bytes=", "")
+        if "-" not in range_spec:
+            raise ValueError("Invalid range format")
+
+        parts = range_spec.split("-")
+        start = int(parts[0]) if parts[0] else 0
+        end = int(parts[1]) if parts[1] else file_size - 1
+
+        # 限制范围
+        start = max(0, start)
+        end = min(end, file_size - 1)
+
+        if start > end or start >= file_size:
+            return Response(
+                status_code=416,
+                headers={"Content-Range": f"bytes */{file_size}"},
+            )
+
+        content_length = end - start + 1
+
+        return StreamingResponse(
+            send_bytes_range(filepath, start, end),
+            status_code=206,
+            media_type="video/mp4",
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(content_length),
+            },
+        )
+    except (ValueError, IndexError):
+        # Range 解析失败，返回完整文件
+        return FileResponse(
+            filepath,
+            media_type="video/mp4",
+            filename=filepath.name,
+            headers={"Accept-Ranges": "bytes"},
+        )
 
 
 @router.delete("/{execution_id}")

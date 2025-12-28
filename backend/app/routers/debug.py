@@ -14,6 +14,7 @@ from sqlalchemy import select
 from app.database import get_db
 from app.config import get_settings
 from app.models.settings import SystemSettings
+from app.models.execution import Execution, ExecutionStatus
 from app.routers.devices import get_connected_devices
 from app.services.autoglm import AutoGLMService
 from app.services.streaming_model import patch_phone_agent, unpatch_phone_agent
@@ -33,15 +34,40 @@ async def execute_stream(request: ExecuteRequest, db: AsyncSession = Depends(get
     if not command.strip():
         raise HTTPException(status_code=400, detail="指令不能为空")
 
-    # 获取已连接设备
-    devices = await get_connected_devices()
-    active_device = next((d for d in devices if d.status == "device"), None)
-    if not active_device:
-        raise HTTPException(status_code=400, detail="未找到已连接的设备")
-
     # 从数据库加载设置
     result = await db.execute(select(SystemSettings))
     db_settings = {s.key: s.value for s in result.scalars().all()}
+
+    # 获取已连接设备
+    devices = await get_connected_devices()
+    online_devices = [d for d in devices if d.status == "device"]
+    if not online_devices:
+        raise HTTPException(status_code=400, detail="未找到已连接的设备")
+
+    # 优先使用用户选定的设备（严格模式：选定设备不可用则失败）
+    selected_serial = db_settings.get("selected_device")
+    active_device = None
+    if selected_serial:
+        active_device = next((d for d in online_devices if d.serial == selected_serial), None)
+        if not active_device:
+            raise HTTPException(status_code=400, detail=f"指定设备 {selected_serial} 不可用")
+    else:
+        # 未选择设备，使用第一个在线设备
+        active_device = online_devices[0]
+
+    # 检查设备是否被其他任务占用
+    running_result = await db.execute(
+        select(Execution).where(
+            Execution.device_serial == active_device.serial,
+            Execution.status == ExecutionStatus.RUNNING,
+        ).limit(1)
+    )
+    running_execution = running_result.scalar_one_or_none()
+    if running_execution:
+        raise HTTPException(
+            status_code=400,
+            detail=f"设备 {active_device.serial} 正在被其他任务占用（执行记录 #{running_execution.id}）"
+        )
 
     base_url = db_settings.get("autoglm_base_url") or settings.autoglm_base_url
     api_key = db_settings.get("autoglm_api_key") or settings.autoglm_api_key

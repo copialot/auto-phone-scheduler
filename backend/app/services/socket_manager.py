@@ -2,11 +2,31 @@
 
 import asyncio
 import logging
+import re
 import sys
 
 import socketio
 
+from app.services.adb import run_adb
 from app.services.scrcpy_stream import ScrcpyStreamer, set_streamer, remove_streamer
+
+
+async def get_device_resolution(device_id: str) -> tuple[int, int] | None:
+    """获取设备的原始分辨率"""
+    try:
+        stdout, _ = await run_adb("shell", "wm", "size", serial=device_id)
+        output = stdout.decode()
+        # 输出格式: "Physical size: 1080x2400" 或 "Override size: ..."
+        # 优先使用 Physical size
+        match = re.search(r'Physical size:\s*(\d+)x(\d+)', output)
+        if not match:
+            # 如果没有 Physical size，尝试匹配任意 size
+            match = re.search(r'(\d+)x(\d+)', output)
+        if match:
+            return int(match.group(1)), int(match.group(2))
+    except Exception as e:
+        logging.warning(f"获取设备分辨率失败: {e}")
+    return None
 
 # 配置日志输出
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
@@ -86,11 +106,20 @@ async def connect_device(sid, data):
             logger.info(f"[stream_video] 读取视频元数据...")
             metadata = await streamer.read_video_metadata()
             logger.info(f"[stream_video] 元数据: {metadata.width}x{metadata.height}, codec={metadata.codec}")
+
+            # 获取设备原始分辨率（用于触控坐标转换）
+            device_resolution = await get_device_resolution(device_id)
+            original_width, original_height = device_resolution if device_resolution else (metadata.width, metadata.height)
+            logger.info(f"[stream_video] 设备原始分辨率: {original_width}x{original_height}")
+
             await sio.emit("video-metadata", {
                 "deviceName": metadata.device_name,
                 "width": metadata.width,
                 "height": metadata.height,
                 "codec": metadata.codec,
+                # 设备原始分辨率，用于触控坐标转换
+                "originalWidth": original_width,
+                "originalHeight": original_height,
             }, room=sid)
 
             # 发送视频数据包

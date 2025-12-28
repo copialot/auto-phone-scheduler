@@ -14,6 +14,16 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { notificationsApi } from '@/api/client'
 import type { NotificationChannel, NotificationChannelCreate, NotificationType } from '@/types'
 import { Plus, Pencil, Trash2, Send, MessageSquare } from 'lucide-react'
@@ -23,6 +33,7 @@ export function Notifications() {
   const [isDialogOpen, setIsDialogOpen] = useState(false)
   const [editingChannel, setEditingChannel] = useState<NotificationChannel | null>(null)
   const [channelType, setChannelType] = useState<NotificationType>('dingtalk')
+  const [deleteChannelId, setDeleteChannelId] = useState<number | null>(null)
   const [formData, setFormData] = useState({
     name: '',
     enabled: true,
@@ -228,11 +239,7 @@ export function Notifications() {
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => {
-                          if (confirm('确定要删除这个通知渠道吗？')) {
-                            deleteMutation.mutate(channel.id)
-                          }
-                        }}
+                        onClick={() => setDeleteChannelId(channel.id)}
                       >
                         <Trash2 className="h-4 w-4" />
                       </Button>
@@ -346,6 +353,32 @@ export function Notifications() {
           </form>
         </DialogContent>
       </Dialog>
+
+      {/* 删除通知渠道确认对话框 */}
+      <AlertDialog open={deleteChannelId !== null} onOpenChange={(open) => !open && setDeleteChannelId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认删除</AlertDialogTitle>
+            <AlertDialogDescription>
+              确定要删除这个通知渠道吗？此操作不可撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (deleteChannelId !== null) {
+                  deleteMutation.mutate(deleteChannelId)
+                  setDeleteChannelId(null)
+                }
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

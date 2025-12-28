@@ -29,3 +29,4 @@ class ExecutionStep(BaseModel):
 class ExecutionDetail(ExecutionResponse):
     steps: list[ExecutionStep] | None
     recording_path: str | None
+    device_serial: str | None = None  # 执行任务的设备 serial

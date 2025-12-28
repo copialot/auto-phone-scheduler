@@ -1,13 +1,16 @@
 import asyncio
 import json
+import random
 import re
 import queue
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -91,7 +94,6 @@ class SchedulerService:
     def __init__(self):
         self.scheduler = AsyncIOScheduler()
         self.autoglm = AutoGLMService()
-        self.recorder = RecorderService()
         self.notifier = NotifierService()
 
     @classmethod
@@ -104,7 +106,24 @@ class SchedulerService:
         """启动调度器并加载已有任务"""
         if not self.scheduler.running:
             self.scheduler.start()
+            await self._cleanup_stale_executions()
             await self.load_tasks()
+
+    async def _cleanup_stale_executions(self):
+        """清理启动时残留的 RUNNING 状态执行记录（服务器异常重启后的清理）"""
+        async with async_session() as session:
+            result = await session.execute(
+                select(Execution).where(Execution.status == ExecutionStatus.RUNNING)
+            )
+            stale_executions = result.scalars().all()
+
+            if stale_executions:
+                for execution in stale_executions:
+                    execution.status = ExecutionStatus.FAILED
+                    execution.finished_at = datetime.utcnow()
+                    execution.error_message = "服务器重启，任务被中断"
+                await session.commit()
+                print(f"[Scheduler] 清理了 {len(stale_executions)} 个残留的执行记录")
 
     async def shutdown(self):
         """关闭调度器"""
@@ -130,25 +149,58 @@ class SchedulerService:
             self.scheduler.remove_job(job_id)
 
         if task.enabled:
-            # 解析 cron 表达式，使用本地时区
+            # 解析 cron 表达式，使用任务指定的时区或服务器本地时区
             cron_parts = task.cron_expression.split()
-            local_tz = datetime.now().astimezone().tzinfo
+            if task.timezone:
+                try:
+                    tz = ZoneInfo(task.timezone)
+                except Exception:
+                    # 无效时区，回退到服务器本地时区
+                    tz = datetime.now().astimezone().tzinfo
+            else:
+                tz = datetime.now().astimezone().tzinfo
             trigger = CronTrigger(
                 minute=cron_parts[0] if len(cron_parts) > 0 else "*",
                 hour=cron_parts[1] if len(cron_parts) > 1 else "*",
                 day=cron_parts[2] if len(cron_parts) > 2 else "*",
                 month=cron_parts[3] if len(cron_parts) > 3 else "*",
                 day_of_week=cron_parts[4] if len(cron_parts) > 4 else "*",
-                timezone=local_tz,
+                timezone=tz,
             )
 
-            self.scheduler.add_job(
-                self.execute_task,
-                trigger,
-                id=job_id,
-                args=[task.id],
-                replace_existing=True,
-            )
+            # 如果设置了随机延迟，使用包装器函数
+            if task.random_delay_minutes and task.random_delay_minutes > 0:
+                self.scheduler.add_job(
+                    self._schedule_delayed_task,
+                    trigger,
+                    id=job_id,
+                    args=[task.id, task.random_delay_minutes],
+                    replace_existing=True,
+                )
+            else:
+                self.scheduler.add_job(
+                    self.execute_task,
+                    trigger,
+                    id=job_id,
+                    args=[task.id],
+                    replace_existing=True,
+                )
+
+    async def _schedule_delayed_task(self, task_id: int, max_delay_minutes: int):
+        """调度延迟执行的任务"""
+        # 随机选择 0 到 max_delay_minutes 之间的延迟时间
+        delay_minutes = random.randint(0, max_delay_minutes)
+        run_time = datetime.now() + timedelta(minutes=delay_minutes)
+
+        # 创建一次性任务
+        delayed_job_id = f"task_{task_id}_delayed_{run_time.timestamp()}"
+        self.scheduler.add_job(
+            self.execute_task,
+            DateTrigger(run_date=run_time),
+            id=delayed_job_id,
+            args=[task_id],
+            replace_existing=True,
+        )
 
     def remove_job(self, task_id: int):
         """移除定时任务"""
@@ -164,8 +216,13 @@ class SchedulerService:
             return job.next_run_time
         return None
 
-    async def _get_first_device(self) -> tuple[str | None, str | None]:
-        """获取第一个已连接的设备信息"""
+    async def _get_all_devices(self) -> list[tuple[str, str, str | None]]:
+        """获取所有已连接的设备信息
+
+        Returns:
+            list of (serial, status, model)
+        """
+        devices = []
         try:
             stdout, _ = await run_adb("devices", "-l")
             output = stdout.decode()
@@ -175,17 +232,276 @@ class SchedulerService:
                 if not line.strip():
                     continue
                 parts = line.split()
-                if len(parts) >= 2 and parts[1] == "device":
+                if len(parts) >= 2:
                     serial = parts[0]
+                    status = parts[1]
                     model = None
                     for part in parts[2:]:
                         if part.startswith("model:"):
                             model = part.split(":")[1]
                             break
-                    return serial, model
+                    devices.append((serial, status, model))
         except Exception:
             pass
+        return devices
+
+    async def _get_selected_device(
+        self, session: "AsyncSession", task_device_serial: str | None = None
+    ) -> tuple[str | None, str | None, str | None]:
+        """获取任务执行设备
+
+        优先级：任务指定设备 > 全局设置设备 > 第一个在线设备
+        如果指定的设备不可用则直接失败，不回退
+
+        Args:
+            session: 数据库会话
+            task_device_serial: 任务指定的设备 serial
+
+        Returns:
+            (serial, model, error_msg) 元组
+            - 成功时返回 (serial, model, None)
+            - 失败时返回 (None, None, error_msg)
+        """
+        from sqlalchemy import select as sql_select
+        from app.models.settings import SystemSettings
+
+        # 获取所有在线设备
+        devices = await self._get_all_devices()
+        online_devices = [(s, m) for s, status, m in devices if status == "device"]
+
+        if not online_devices:
+            return None, None, "未找到可用设备"
+
+        # 1. 优先使用任务指定的设备
+        if task_device_serial:
+            for serial, model in online_devices:
+                if serial == task_device_serial:
+                    return serial, model, None
+            return None, None, f"任务指定设备 {task_device_serial} 不可用"
+
+        # 2. 其次使用全局设置的设备
+        result = await session.execute(
+            sql_select(SystemSettings).where(SystemSettings.key == "selected_device")
+        )
+        setting = result.scalar_one_or_none()
+        global_serial = setting.value if setting else None
+
+        if global_serial:
+            for serial, model in online_devices:
+                if serial == global_serial:
+                    return serial, model, None
+            return None, None, f"全局设置设备 {global_serial} 不可用"
+
+        # 3. 回退到第一个在线设备
+        return online_devices[0][0], online_devices[0][1], None
+
+    async def _get_first_device(self) -> tuple[str | None, str | None]:
+        """获取第一个已连接的设备信息（兼容旧调用）"""
+        devices = await self._get_all_devices()
+        for serial, status, model in devices:
+            if status == "device":
+                return serial, model
         return None, None
+
+    async def _is_device_busy(
+        self, session: AsyncSession, device_serial: str, exclude_execution_id: int | None = None
+    ) -> tuple[bool, int | None]:
+        """检查设备是否被其他任务占用
+
+        Args:
+            session: 数据库会话
+            device_serial: 设备序列号
+            exclude_execution_id: 排除的执行记录ID（用于当前任务自己的检查）
+
+        Returns:
+            (is_busy, running_execution_id) - 如果设备被占用返回 (True, execution_id)
+        """
+        query = select(Execution).where(
+            Execution.device_serial == device_serial,
+            Execution.status == ExecutionStatus.RUNNING,
+        )
+        if exclude_execution_id:
+            query = query.where(Execution.id != exclude_execution_id)
+
+        # 使用 first() 而不是 scalar_one_or_none()，以处理可能存在多个运行中任务的情况
+        result = await session.execute(query.limit(1))
+        running_execution = result.scalar_one_or_none()
+
+        if running_execution:
+            return True, running_execution.id
+        return False, None
+
+    async def _is_screen_locked(self, device_serial: str) -> tuple[bool, bool]:
+        """检测屏幕是否锁定
+        返回: (屏幕是否亮着, 是否在锁屏界面)
+
+        使用多种方法检测以提高兼容性：
+        1. mScreenOnFully - 屏幕完全亮起状态（最准确）
+        2. mWakefulness - 设备唤醒状态
+        3. mInputRestricted - 输入受限状态（锁屏时为 true）
+        4. mShowingLockscreen / mDreamingLockscreen - 锁屏界面状态
+        """
+        try:
+            screen_on = False
+            is_locked = False
+
+            # 方法1: 检查 window policy 状态（最准确）
+            try:
+                stdout, _ = await run_adb(
+                    "shell", "dumpsys", "window", "policy",
+                    serial=device_serial
+                )
+                policy_output = stdout.decode()
+                # mScreenOnFully=true 表示屏幕完全亮起
+                if "mScreenOnFully=true" in policy_output:
+                    screen_on = True
+                # mInputRestricted=true 表示输入受限（锁屏状态）
+                if "mInputRestricted=true" in policy_output:
+                    is_locked = True
+            except Exception:
+                pass
+
+            # 方法2: 如果方法1未检测到屏幕状态，尝试 power 状态
+            if not screen_on:
+                try:
+                    stdout, _ = await run_adb(
+                        "shell", "dumpsys", "power",
+                        serial=device_serial
+                    )
+                    power_output = stdout.decode()
+                    # 检查多种屏幕开启标志
+                    if any(x in power_output for x in [
+                        "mWakefulness=Awake",
+                        "Display Power: state=ON",
+                        "mHoldingDisplaySuspendBlocker=true",
+                    ]):
+                        screen_on = True
+                    # 如果 mWakefulness=Asleep 或 Dozing，屏幕肯定关闭
+                    if "mWakefulness=Asleep" in power_output or "mWakefulness=Dozing" in power_output:
+                        screen_on = False
+                except Exception:
+                    pass
+
+            # 方法3: 如果方法1未检测到锁屏状态，尝试 window 状态
+            if not is_locked:
+                try:
+                    stdout, _ = await run_adb(
+                        "shell", "dumpsys", "window",
+                        serial=device_serial
+                    )
+                    window_output = stdout.decode()
+                    # 检查多种锁屏标志
+                    if any(x in window_output for x in [
+                        "mShowingLockscreen=true",
+                        "mDreamingLockscreen=true",
+                        "isStatusBarKeyguard=true",
+                    ]):
+                        is_locked = True
+                except Exception:
+                    pass
+
+            return screen_on, is_locked
+        except Exception:
+            # 如果检测失败，假设需要唤醒和解锁
+            return False, True
+
+    async def _wake_and_unlock_device(
+        self, session: AsyncSession, device_serial: str, wake: bool, unlock: bool,
+        logs: list[dict] | None = None
+    ) -> tuple[bool, str | None]:
+        """唤醒和解锁设备（会先检测屏幕状态，避免误操作）
+
+        Args:
+            session: 数据库会话
+            device_serial: 设备序列号
+            wake: 是否唤醒
+            unlock: 是否解锁
+            logs: 可选的日志列表，用于收集操作日志
+
+        Returns:
+            (success, error_message) - 成功时返回 (True, None)，失败时返回 (False, error_message)
+        """
+        from app.models.device_config import DeviceConfig
+
+        def add_log(message: str, log_type: str = "info"):
+            if logs is not None:
+                logs.append({
+                    "step": 0,
+                    "thinking": message,
+                    "action": {"action": "SystemLog", "type": log_type},
+                    "timestamp": datetime.utcnow().isoformat(),
+                })
+
+        if not wake and not unlock:
+            return True, None
+
+        # 获取设备配置
+        result = await session.execute(
+            select(DeviceConfig).where(DeviceConfig.device_serial == device_serial)
+        )
+        config = result.scalar_one_or_none()
+
+        # 先检测屏幕状态
+        screen_on, is_locked = await self._is_screen_locked(device_serial)
+        add_log(f"检测屏幕状态: {'亮屏' if screen_on else '息屏'}, {'已锁定' if is_locked else '未锁定'}")
+
+        # 唤醒设备（仅在屏幕未亮时）
+        if wake and not screen_on:
+            add_log("正在唤醒设备...")
+            if config and config.wake_enabled:
+                # 使用自定义唤醒命令或默认命令
+                if config.wake_command:
+                    await run_adb("shell", config.wake_command, serial=device_serial)
+                else:
+                    await run_adb("shell", "input", "keyevent", "KEYCODE_WAKEUP", serial=device_serial)
+            else:
+                # 默认唤醒命令
+                await run_adb("shell", "input", "keyevent", "KEYCODE_WAKEUP", serial=device_serial)
+            # 等待屏幕亮起
+            await asyncio.sleep(0.5)
+            # 重新检测状态
+            screen_on, is_locked = await self._is_screen_locked(device_serial)
+            add_log(f"唤醒完成，屏幕状态: {'亮屏' if screen_on else '息屏'}")
+
+        # 解锁设备（仅在锁屏状态时）
+        if unlock and is_locked and config and config.unlock_enabled and config.unlock_type:
+            add_log("正在解锁设备...")
+            max_retries = 3
+            for attempt in range(max_retries):
+                if config.unlock_type in ("swipe", "longpress"):
+                    start_x = config.unlock_start_x or 0
+                    start_y = config.unlock_start_y or 0
+                    end_x = config.unlock_end_x or start_x
+                    end_y = config.unlock_end_y or start_y
+                    duration = config.unlock_duration or 300
+
+                    await run_adb(
+                        "shell", "input", "swipe",
+                        str(start_x), str(start_y), str(end_x), str(end_y), str(duration),
+                        serial=device_serial
+                    )
+
+                # 等待解锁完成
+                await asyncio.sleep(0.5)
+
+                # 检查是否已解锁
+                _, still_locked = await self._is_screen_locked(device_serial)
+                if not still_locked:
+                    # 解锁成功
+                    add_log("设备解锁成功")
+                    return True, None
+
+                # 如果还是锁定状态，等待后重试
+                if attempt < max_retries - 1:
+                    add_log(f"解锁未成功，正在重试 ({attempt + 2}/{max_retries})...")
+                    await asyncio.sleep(0.5)
+
+            # 重试 3 次仍然锁定，返回失败
+            error_msg = f"设备解锁失败：重试 {max_retries} 次后仍处于锁屏状态"
+            add_log(error_msg, "error")
+            return False, error_msg
+
+        return True, None
 
     async def execute_task(self, task_id: int):
         """执行任务（定时任务调用），使用与 run_task_with_execution 相同的配置加载逻辑"""
@@ -202,22 +518,93 @@ class SchedulerService:
             if not task:
                 return
 
-            # 获取设备信息
-            device_serial, device_model = await self._get_first_device()
+            # 从数据库加载设置
+            result = await session.execute(sql_select(SystemSettings))
+            db_settings = {s.key: s.value for s in result.scalars().all()}
 
-            # 创建执行记录
+            # 获取设备信息（优先使用任务指定设备）
+            device_serial, device_model, device_error = await self._get_selected_device(
+                session, task_device_serial=task.device_serial
+            )
+
+            # 检查设备是否可用
+            if not device_serial:
+                # 创建失败的执行记录
+                execution = Execution(
+                    task_id=task_id,
+                    status=ExecutionStatus.FAILED,
+                    started_at=datetime.utcnow(),
+                    finished_at=datetime.utcnow(),
+                    error_message=device_error,
+                )
+                session.add(execution)
+                await session.commit()
+                await session.refresh(execution)
+                # 发送失败通知
+                await self._send_notifications(session, task, execution)
+                return
+
+            # 检查设备是否被其他任务占用
+            is_busy, running_exec_id = await self._is_device_busy(session, device_serial)
+            if is_busy:
+                # 创建失败的执行记录
+                execution = Execution(
+                    task_id=task_id,
+                    status=ExecutionStatus.FAILED,
+                    started_at=datetime.utcnow(),
+                    finished_at=datetime.utcnow(),
+                    device_serial=device_serial,
+                    error_message=f"设备 {device_serial} 正在被其他任务占用（执行记录 #{running_exec_id}）",
+                )
+                session.add(execution)
+                await session.commit()
+                await session.refresh(execution)
+                # 发送失败通知
+                await self._send_notifications(session, task, execution)
+                return
+
+            # 创建执行记录（包含设备信息）
             execution = Execution(
                 task_id=task_id,
                 status=ExecutionStatus.RUNNING,
                 started_at=datetime.utcnow(),
+                device_serial=device_serial,  # 保存实际使用的设备
             )
             session.add(execution)
             await session.commit()
             await session.refresh(execution)
 
-            # 从数据库加载设置
-            result = await session.execute(sql_select(SystemSettings))
-            db_settings = {s.key: s.value for s in result.scalars().all()}
+            # 执行前唤醒和解锁设备（收集日志）
+            wake_unlock_logs: list[dict] = []
+            unlock_success, unlock_error = await self._wake_and_unlock_device(
+                session, device_serial,
+                wake=task.wake_before_run,
+                unlock=task.unlock_before_run,
+                logs=wake_unlock_logs
+            )
+
+            # 保存唤醒解锁日志到执行记录，并发布到 SSE
+            if wake_unlock_logs:
+                execution.steps = wake_unlock_logs.copy()
+                await session.commit()
+                # 发布唤醒解锁日志到 SSE（实时显示）
+                for log in wake_unlock_logs:
+                    await event_bus.publish(execution.id, "step", log)
+
+            # 检查解锁是否成功
+            if not unlock_success:
+                execution.status = ExecutionStatus.FAILED
+                execution.finished_at = datetime.utcnow()
+                execution.error_message = unlock_error
+                await session.commit()
+                # 发布失败事件到 SSE
+                await event_bus.publish(execution.id, "done", {
+                    "success": False,
+                    "message": unlock_error,
+                })
+                # 发送失败通知
+                await self._send_notifications(session, task, execution)
+                return
 
             base_url = db_settings.get("autoglm_base_url") or settings.autoglm_base_url
             api_key = db_settings.get("autoglm_api_key") or settings.autoglm_api_key
@@ -231,9 +618,12 @@ class SchedulerService:
             )
             cmd = self.autoglm.apply_prompt_rules(task.command, prefix_prompt, suffix_prompt)
 
+            # 创建带设备 serial 的录制服务
+            recorder = RecorderService(device_serial=device_serial)
+
             try:
                 # 开始录屏
-                recording_path = await self.recorder.start_recording(execution.id)
+                recording_path = await recorder.start_recording(execution.id)
 
                 # 直接使用 PhoneAgent
                 from phone_agent import PhoneAgent
@@ -314,7 +704,8 @@ class SchedulerService:
 
                 # 在主协程中处理队列，实时更新数据库
                 # 使用非阻塞方式检查队列，确保不阻塞事件循环
-                collected_steps = []
+                # 将唤醒解锁日志作为初始步骤
+                collected_steps = wake_unlock_logs.copy()
                 loop = asyncio.get_event_loop()
                 while True:
                     # 使用 run_in_executor 将阻塞的 queue.get 放到线程池
@@ -350,7 +741,14 @@ class SchedulerService:
                 error_msg = result_holder["error_msg"]
 
                 # 停止录屏并获取实际的录制文件路径
-                actual_recording_path = await self.recorder.stop_recording()
+                actual_recording_path = await recorder.stop_recording()
+
+                # 执行完成后返回主屏幕
+                if task.go_home_after_run:
+                    try:
+                        await run_adb("shell", "input", "keyevent", "KEYCODE_HOME", serial=device_serial)
+                    except Exception:
+                        pass  # 忽略返回主屏幕的错误
 
                 # 更新执行记录
                 execution.status = ExecutionStatus.SUCCESS if success else ExecutionStatus.FAILED
@@ -368,7 +766,14 @@ class SchedulerService:
 
             except Exception as e:
                 # 停止录屏
-                await self.recorder.stop_recording()
+                await recorder.stop_recording()
+
+                # 执行失败也尝试返回主屏幕
+                if task.go_home_after_run:
+                    try:
+                        await run_adb("shell", "input", "keyevent", "KEYCODE_HOME", serial=device_serial)
+                    except Exception:
+                        pass
 
                 # 更新执行记录为失败
                 execution.status = ExecutionStatus.FAILED
@@ -519,12 +924,85 @@ class SchedulerService:
             if not execution:
                 return
 
-            # 获取设备信息
-            device_serial, device_model = await self._get_first_device()
-
             # 从数据库加载设置（参考 debug.py 的方式）
             result = await session.execute(sql_select(SystemSettings))
             db_settings = {s.key: s.value for s in result.scalars().all()}
+
+            # 获取设备信息（优先使用任务指定设备）
+            device_serial, device_model, device_error = await self._get_selected_device(
+                session, task_device_serial=task.device_serial
+            )
+
+            # 更新执行记录的设备信息
+            execution.device_serial = device_serial
+            await session.commit()
+
+            # 检查设备是否可用
+            if not device_serial:
+                execution.status = ExecutionStatus.FAILED
+                execution.finished_at = datetime.utcnow()
+                execution.error_message = device_error
+                await session.commit()
+                # 发布失败事件到 SSE
+                await event_bus.publish(execution_id, "done", {
+                    "success": False,
+                    "message": device_error,
+                })
+                # 发送失败通知
+                await self._send_notifications(session, task, execution)
+                return
+
+            # 检查设备是否被其他任务占用（排除当前执行记录）
+            is_busy, running_exec_id = await self._is_device_busy(
+                session, device_serial, exclude_execution_id=execution_id
+            )
+            if is_busy:
+                busy_error = f"设备 {device_serial} 正在被其他任务占用（执行记录 #{running_exec_id}）"
+                execution.status = ExecutionStatus.FAILED
+                execution.finished_at = datetime.utcnow()
+                execution.error_message = busy_error
+                await session.commit()
+                # 发布失败事件到 SSE
+                await event_bus.publish(execution_id, "done", {
+                    "success": False,
+                    "message": busy_error,
+                })
+                # 发送失败通知
+                await self._send_notifications(session, task, execution)
+                return
+
+            # 执行前唤醒和解锁设备（收集日志）
+            wake_unlock_logs: list[dict] = []
+            unlock_success, unlock_error = await self._wake_and_unlock_device(
+                session, device_serial,
+                wake=task.wake_before_run,
+                unlock=task.unlock_before_run,
+                logs=wake_unlock_logs
+            )
+
+            # 保存唤醒解锁日志到执行记录，并发布到 SSE
+            if wake_unlock_logs:
+                steps_list.extend(wake_unlock_logs)
+                execution.steps = steps_list.copy()
+                await session.commit()
+                # 发布唤醒解锁日志到 SSE
+                for log in wake_unlock_logs:
+                    await event_bus.publish(execution_id, "step", log)
+
+            # 检查解锁是否成功
+            if not unlock_success:
+                execution.status = ExecutionStatus.FAILED
+                execution.finished_at = datetime.utcnow()
+                execution.error_message = unlock_error
+                await session.commit()
+                # 发布失败事件到 SSE
+                await event_bus.publish(execution_id, "done", {
+                    "success": False,
+                    "message": unlock_error,
+                })
+                # 发送失败通知
+                await self._send_notifications(session, task, execution)
+                return
 
             base_url = db_settings.get("autoglm_base_url") or settings.autoglm_base_url
             api_key = db_settings.get("autoglm_api_key") or settings.autoglm_api_key
@@ -538,9 +1016,12 @@ class SchedulerService:
             )
             cmd = self.autoglm.apply_prompt_rules(task.command, prefix_prompt, suffix_prompt)
 
+            # 创建带设备 serial 的录制服务
+            recorder = RecorderService(device_serial=device_serial)
+
             try:
                 # 开始录屏
-                recording_path = await self.recorder.start_recording(execution.id)
+                recording_path = await recorder.start_recording(execution.id)
 
                 # 直接使用 PhoneAgent，实现实时步骤保存
                 from phone_agent import PhoneAgent
@@ -645,7 +1126,14 @@ class SchedulerService:
                 await publisher_task
 
                 # 停止录屏并获取实际的录制文件路径
-                actual_recording_path = await self.recorder.stop_recording()
+                actual_recording_path = await recorder.stop_recording()
+
+                # 执行完成后返回主屏幕
+                if task.go_home_after_run:
+                    try:
+                        await run_adb("shell", "input", "keyevent", "KEYCODE_HOME", serial=device_serial)
+                    except Exception:
+                        pass  # 忽略返回主屏幕的错误
 
                 # 更新执行记录
                 execution.status = ExecutionStatus.SUCCESS if success else ExecutionStatus.FAILED
@@ -672,7 +1160,14 @@ class SchedulerService:
                 stop_event.set()
 
                 # 停止录屏
-                await self.recorder.stop_recording()
+                await recorder.stop_recording()
+
+                # 执行失败也尝试返回主屏幕
+                if task.go_home_after_run:
+                    try:
+                        await run_adb("shell", "input", "keyevent", "KEYCODE_HOME", serial=device_serial)
+                    except Exception:
+                        pass
 
                 # 更新执行记录为失败
                 execution.status = ExecutionStatus.FAILED

@@ -24,6 +24,9 @@ interface ScrcpyPlayerProps {
   className?: string
   onFallback?: () => void
   fallbackTimeout?: number
+  enableTouch?: boolean  // 是否启用触控操作
+  onSwipe?: (startX: number, startY: number, endX: number, endY: number) => void
+  onTap?: (x: number, y: number) => void
 }
 
 interface VideoMetadata {
@@ -31,6 +34,9 @@ interface VideoMetadata {
   width?: number
   height?: number
   codec?: number
+  // 设备原始分辨率（用于触控坐标转换）
+  originalWidth?: number
+  originalHeight?: number
 }
 
 interface VideoPacket {
@@ -45,6 +51,9 @@ export function ScrcpyPlayer({
   className,
   onFallback,
   fallbackTimeout = 5000,
+  enableTouch = false,
+  onSwipe,
+  onTap,
 }: ScrcpyPlayerProps) {
   const socketRef = useRef<Socket | null>(null)
   const decoderRef = useRef<WebCodecsVideoDecoder | null>(null)
@@ -56,6 +65,12 @@ export function ScrcpyPlayer({
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error' | 'disconnected'>('connecting')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [screenInfo, setScreenInfo] = useState<{ width: number; height: number } | null>(null)
+  // 设备原始分辨率（用于触控坐标转换，因为 scrcpy 视频是缩放过的）
+  const [deviceResolution, setDeviceResolution] = useState<{ width: number; height: number } | null>(null)
+
+  // 触控状态
+  const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null)
+  const isDraggingRef = useRef(false)
 
   // 创建视频帧渲染器
   const createVideoFrameRenderer = useCallback(async () => {
@@ -180,6 +195,12 @@ export function ScrcpyPlayer({
     socket.on('video-metadata', async (metadata: VideoMetadata) => {
       console.log('[ScrcpyPlayer] 收到 video-metadata:', metadata)
       try {
+        // 保存设备原始分辨率（用于触控坐标转换）
+        if (metadata.originalWidth && metadata.originalHeight) {
+          setDeviceResolution({ width: metadata.originalWidth, height: metadata.originalHeight })
+          console.log('[ScrcpyPlayer] 设备原始分辨率:', metadata.originalWidth, 'x', metadata.originalHeight)
+        }
+
         if (decoderRef.current) {
           decoderRef.current.dispose()
           decoderRef.current = null
@@ -316,11 +337,107 @@ export function ScrcpyPlayer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deviceId])
 
+  // 将屏幕坐标转换为设备坐标
+  const screenToDevice = useCallback((clientX: number, clientY: number): { x: number; y: number } | null => {
+    const canvas = canvasRef.current
+    // 使用设备原始分辨率进行坐标转换（而不是 scrcpy 缩放后的分辨率）
+    const targetResolution = deviceResolution || screenInfo
+    if (!canvas || !targetResolution) {
+      console.log('[ScrcpyPlayer] screenToDevice: canvas 或分辨率不存在', { canvas: !!canvas, deviceResolution, screenInfo })
+      return null
+    }
+
+    const rect = canvas.getBoundingClientRect()
+    // 使用 canvas 的显示尺寸（CSS 样式设置的尺寸）
+    const displayWidth = rect.width
+    const displayHeight = rect.height
+
+    // 计算点击位置相对于 canvas 的比例
+    const relativeX = clientX - rect.left
+    const relativeY = clientY - rect.top
+
+    // 检查点击是否在 canvas 范围内
+    if (relativeX < 0 || relativeX > displayWidth || relativeY < 0 || relativeY > displayHeight) {
+      console.log('[ScrcpyPlayer] screenToDevice: 点击在 canvas 范围外', { relativeX, relativeY, displayWidth, displayHeight })
+      return null
+    }
+
+    // 转换为设备原始分辨率坐标（ADB input 命令需要原始分辨率）
+    const x = Math.round((relativeX / displayWidth) * targetResolution.width)
+    const y = Math.round((relativeY / displayHeight) * targetResolution.height)
+
+    console.log('[ScrcpyPlayer] screenToDevice:', {
+      clientX, clientY,
+      rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+      deviceResolution,
+      screenInfo,
+      result: { x, y }
+    })
+
+    return { x, y }
+  }, [deviceResolution, screenInfo])
+
+  // 触控事件处理
+  const handlePointerDown = useCallback((e: React.PointerEvent) => {
+    if (!enableTouch || status !== 'connected') return
+
+    const coords = screenToDevice(e.clientX, e.clientY)
+    if (!coords) return
+
+    touchStartRef.current = { x: coords.x, y: coords.y, time: Date.now() }
+    isDraggingRef.current = false
+  }, [enableTouch, status, screenToDevice])
+
+  const handlePointerMove = useCallback((e: React.PointerEvent) => {
+    if (!enableTouch || !touchStartRef.current) return
+
+    const coords = screenToDevice(e.clientX, e.clientY)
+    if (!coords) return
+
+    const dx = Math.abs(coords.x - touchStartRef.current.x)
+    const dy = Math.abs(coords.y - touchStartRef.current.y)
+
+    // 移动超过 10 像素认为是拖动
+    if (dx > 10 || dy > 10) {
+      isDraggingRef.current = true
+    }
+  }, [enableTouch, screenToDevice])
+
+  const handlePointerUp = useCallback((e: React.PointerEvent) => {
+    if (!enableTouch || !touchStartRef.current) return
+
+    const coords = screenToDevice(e.clientX, e.clientY)
+    if (!coords) return
+
+    const start = touchStartRef.current
+    const duration = Date.now() - start.time
+
+    if (isDraggingRef.current) {
+      // 滑动操作
+      onSwipe?.(start.x, start.y, coords.x, coords.y)
+    } else if (duration < 300) {
+      // 短按 = 点击
+      onTap?.(start.x, start.y)
+    }
+
+    touchStartRef.current = null
+    isDraggingRef.current = false
+  }, [enableTouch, screenToDevice, onSwipe, onTap])
+
+  const handlePointerLeave = useCallback(() => {
+    touchStartRef.current = null
+    isDraggingRef.current = false
+  }, [])
+
   return (
     <div className={`relative w-full h-full flex items-center justify-center ${className || ''}`}>
       <div
         ref={videoContainerRef}
-        className="relative w-full h-full flex items-center justify-center bg-black/5 rounded-lg"
+        className={`relative w-full h-full flex items-center justify-center bg-black/5 rounded-lg ${enableTouch ? 'cursor-pointer' : ''}`}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerLeave={handlePointerLeave}
       >
         {status !== 'connected' && (
           <div className="absolute inset-0 flex items-center justify-center text-muted-foreground">

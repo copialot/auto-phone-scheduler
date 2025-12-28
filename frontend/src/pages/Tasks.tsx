@@ -28,9 +28,16 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import { tasksApi, taskTemplatesApi, notificationsApi, executionsApi } from '@/api/client'
+import { tasksApi, taskTemplatesApi, notificationsApi, executionsApi, devicesApi } from '@/api/client'
 import { formatDateTime } from '@/lib/utils'
 import type { Task, TaskCreate, TaskTemplate, Execution } from '@/types'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import {
   Plus,
   Play,
@@ -48,6 +55,7 @@ import {
   ChevronRight,
   ListTodo,
   History,
+  Smartphone,
 } from 'lucide-react'
 
 // 图标映射
@@ -64,6 +72,7 @@ function ExecutionHistory() {
   const navigate = useNavigate()
   const [page, setPage] = useState(0)
   const [showClearDialog, setShowClearDialog] = useState(false)
+  const [deleteExecutionId, setDeleteExecutionId] = useState<number | null>(null)
   const pageSize = 10
 
   const { data: countData } = useQuery({
@@ -155,6 +164,32 @@ function ExecutionHistory() {
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
+
+        {/* 删除单条记录确认对话框 */}
+        <AlertDialog open={deleteExecutionId !== null} onOpenChange={(open) => !open && setDeleteExecutionId(null)}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>确认删除</AlertDialogTitle>
+              <AlertDialogDescription>
+                确定要删除这条执行记录吗？此操作不可撤销。
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>取消</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => {
+                  if (deleteExecutionId !== null) {
+                    deleteMutation.mutate(deleteExecutionId)
+                    setDeleteExecutionId(null)
+                  }
+                }}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              >
+                删除
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
 
       {/* 列表 */}
@@ -206,11 +241,7 @@ function ExecutionHistory() {
                     <Button
                       size="sm"
                       variant="ghost"
-                      onClick={() => {
-                        if (confirm('确定要删除这条记录吗？')) {
-                          deleteMutation.mutate(exec.id)
-                        }
-                      }}
+                      onClick={() => setDeleteExecutionId(exec.id)}
                     >
                       <Trash2 className="h-4 w-4" />
                     </Button>
@@ -257,6 +288,7 @@ function TaskList() {
   const [isDialogOpen, setIsDialogOpen] = useState(false)
   const [isTemplateDialogOpen, setIsTemplateDialogOpen] = useState(false)
   const [editingTask, setEditingTask] = useState<Task | null>(null)
+  const [deleteTaskId, setDeleteTaskId] = useState<number | null>(null)
   const [formData, setFormData] = useState<TaskCreate>({
     name: '',
     description: '',
@@ -267,6 +299,10 @@ function TaskList() {
     notify_on_failure: true,
     notification_channel_ids: null,
     auto_confirm_sensitive: true,
+    random_delay_minutes: null,
+    device_serial: null,
+    wake_before_run: true,
+    unlock_before_run: true,
   })
 
   const { data: tasks = [], isLoading } = useQuery({
@@ -282,6 +318,11 @@ function TaskList() {
   const { data: notificationChannels = [] } = useQuery({
     queryKey: ['notification-channels'],
     queryFn: notificationsApi.list,
+  })
+
+  const { data: devices = [] } = useQuery({
+    queryKey: ['devices'],
+    queryFn: devicesApi.list,
   })
 
   const createMutation = useMutation({
@@ -328,6 +369,11 @@ function TaskList() {
       notify_on_failure: true,
       notification_channel_ids: null,
       auto_confirm_sensitive: true,
+      device_serial: null,
+      random_delay_minutes: null,
+      wake_before_run: true,
+      unlock_before_run: true,
+      go_home_after_run: false,
     })
     setIsDialogOpen(true)
   }
@@ -347,6 +393,11 @@ function TaskList() {
       notify_on_failure: true,
       notification_channel_ids: null,
       auto_confirm_sensitive: true,
+      device_serial: null,
+      random_delay_minutes: null,
+      wake_before_run: true,
+      unlock_before_run: true,
+      go_home_after_run: false,
     })
     setIsTemplateDialogOpen(false)
     setIsDialogOpen(true)
@@ -364,6 +415,11 @@ function TaskList() {
       notify_on_failure: task.notify_on_failure,
       notification_channel_ids: task.notification_channel_ids,
       auto_confirm_sensitive: task.auto_confirm_sensitive,
+      device_serial: task.device_serial,
+      random_delay_minutes: task.random_delay_minutes,
+      wake_before_run: task.wake_before_run,
+      unlock_before_run: task.unlock_before_run,
+      go_home_after_run: task.go_home_after_run,
     })
     setIsDialogOpen(true)
   }
@@ -375,10 +431,15 @@ function TaskList() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
+    // 自动添加浏览器时区
+    const dataWithTimezone = {
+      ...formData,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    }
     if (editingTask) {
-      updateMutation.mutate({ id: editingTask.id, data: formData })
+      updateMutation.mutate({ id: editingTask.id, data: dataWithTimezone })
     } else {
-      createMutation.mutate(formData)
+      createMutation.mutate(dataWithTimezone)
     }
   }
 
@@ -461,11 +522,7 @@ function TaskList() {
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() => {
-                        if (confirm('确定要删除这个任务吗？')) {
-                          deleteMutation.mutate(task.id)
-                        }
-                      }}
+                      onClick={() => setDeleteTaskId(task.id)}
                     >
                       <Trash2 className="h-4 w-4" />
                     </Button>
@@ -480,12 +537,17 @@ function TaskList() {
                       {task.command}
                     </code>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <Clock className="h-4 w-4 text-muted-foreground" />
                     <span className="text-muted-foreground">Cron:</span>
                     <code className="bg-muted px-2 py-1 rounded text-xs">
                       {task.cron_expression}
                     </code>
+                    {task.random_delay_minutes && task.random_delay_minutes > 0 && (
+                      <span className="text-xs text-orange-500">
+                        (随机延迟 0~{task.random_delay_minutes} 分钟)
+                      </span>
+                    )}
                     {task.next_run && (
                       <span className="text-muted-foreground">
                         下次运行: {formatDateTime(task.next_run)}
@@ -631,6 +693,37 @@ function TaskList() {
               </div>
             </div>
 
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <Label htmlFor="random_delay">随机延迟 (分钟)</Label>
+                <span className="text-xs text-muted-foreground">
+                  (在 Cron 触发后随机延迟执行，增加随机性)
+                </span>
+              </div>
+              <div className="flex gap-2 items-center">
+                <Input
+                  id="random_delay"
+                  type="number"
+                  min="0"
+                  max="120"
+                  value={formData.random_delay_minutes ?? ''}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      random_delay_minutes: e.target.value ? parseInt(e.target.value, 10) : null,
+                    })
+                  }
+                  placeholder="不延迟"
+                  className="w-24"
+                />
+                <span className="text-sm text-muted-foreground">
+                  {formData.random_delay_minutes
+                    ? `将在 0~${formData.random_delay_minutes} 分钟内随机执行`
+                    : '准时执行'}
+                </span>
+              </div>
+            </div>
+
             <div className="flex items-center justify-between">
               <Label htmlFor="enabled">启用任务</Label>
               <Switch
@@ -656,6 +749,92 @@ function TaskList() {
                   setFormData({ ...formData, auto_confirm_sensitive: checked })
                 }
               />
+            </div>
+
+            {/* 执行设备选择 */}
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <Smartphone className="h-4 w-4 text-muted-foreground" />
+                <Label>执行设备</Label>
+                <span className="text-xs text-muted-foreground">
+                  (不选择则使用全局设置的设备)
+                </span>
+              </div>
+              <Select
+                value={formData.device_serial || '__global__'}
+                onValueChange={(value) =>
+                  setFormData({
+                    ...formData,
+                    device_serial: value === '__global__' ? null : value,
+                  })
+                }
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="使用全局设置的设备" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__global__">使用全局设置的设备</SelectItem>
+                  {devices
+                    .filter((d) => d.status === 'device')
+                    .map((device) => (
+                      <SelectItem key={device.serial} value={device.serial}>
+                        {device.model || device.serial}
+                        <span className="text-xs text-muted-foreground ml-2">
+                          ({device.serial})
+                        </span>
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+
+              {/* 唤醒和解锁选项 */}
+              <div className="pl-6 space-y-3 pt-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <Label htmlFor="wake_before_run">执行前唤醒设备</Label>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      使用设备配置中的唤醒命令
+                    </p>
+                  </div>
+                  <Switch
+                    id="wake_before_run"
+                    checked={formData.wake_before_run}
+                    onCheckedChange={(checked) =>
+                      setFormData({ ...formData, wake_before_run: checked })
+                    }
+                  />
+                </div>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <Label htmlFor="unlock_before_run">执行前解锁设备</Label>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      使用设备配置中的解锁命令
+                    </p>
+                  </div>
+                  <Switch
+                    id="unlock_before_run"
+                    checked={formData.unlock_before_run}
+                    onCheckedChange={(checked) =>
+                      setFormData({ ...formData, unlock_before_run: checked })
+                    }
+                  />
+                </div>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <Label htmlFor="go_home_after_run">执行后返回主屏幕</Label>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      任务完成后自动返回桌面
+                    </p>
+                  </div>
+                  <Switch
+                    id="go_home_after_run"
+                    checked={formData.go_home_after_run}
+                    onCheckedChange={(checked) =>
+                      setFormData({ ...formData, go_home_after_run: checked })
+                    }
+                  />
+                </div>
+              </div>
             </div>
 
             <div className="flex items-center justify-between">
@@ -748,6 +927,32 @@ function TaskList() {
           </form>
         </DialogContent>
       </Dialog>
+
+      {/* 删除任务确认对话框 */}
+      <AlertDialog open={deleteTaskId !== null} onOpenChange={(open) => !open && setDeleteTaskId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认删除</AlertDialogTitle>
+            <AlertDialogDescription>
+              确定要删除这个任务吗？相关的执行记录也会被删除，此操作不可撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (deleteTaskId !== null) {
+                  deleteMutation.mutate(deleteTaskId)
+                  setDeleteTaskId(null)
+                }
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

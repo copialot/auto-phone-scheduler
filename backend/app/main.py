@@ -19,6 +19,7 @@ from app.routers import (
 )
 from app.services.scheduler import SchedulerService
 from app.services.socket_manager import create_socket_app
+from app.services.device_manager import DeviceConnectionManager
 from app.config import get_settings
 from app.patches import apply_all_patches
 from app.patches.phone_agent_patch import load_custom_app_packages
@@ -35,11 +36,16 @@ async def lifespan(app: FastAPI):
     await init_db()
     # 加载自定义 APP 包名
     await load_custom_app_packages()
+    # 启动设备连接管理器
+    device_manager = DeviceConnectionManager.get_instance()
+    await device_manager.start()
+    # 启动调度器
     scheduler = SchedulerService.get_instance()
     await scheduler.start()
     yield
     # 关闭时
     await scheduler.shutdown()
+    await device_manager.stop()
 
 
 app = FastAPI(

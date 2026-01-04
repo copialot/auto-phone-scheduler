@@ -9,4 +9,5 @@ httpx==0.26.0
 python-multipart==0.0.6
 aiofiles==23.2.1
 python-socketio==5.11.0
+zeroconf==0.136.2
 phone-agent @ git+https://github.com/zai-org/Open-AutoGLM.git

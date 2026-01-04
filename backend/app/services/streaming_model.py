@@ -60,10 +60,11 @@ class StreamingModelClient:
         in_action_phase = False
         first_token_received = False
 
-        # 重复检测：检测模型陷入无限循环
-        repeat_detector = ""
-        repeat_count = 0
-        max_repeat_count = 10  # 连续重复 10 次相同模式则终止
+        # 重复检测：检测模型陷入无限循环（使用滑动窗口检测重复模式）
+        repeat_window = ""  # 收集最近的内容用于模式检测
+        max_window_size = 500  # 窗口大小
+        min_pattern_length = 5  # 最小重复模式长度（避免误判单个字符）
+        max_repeat_count = 5  # 同一模式重复次数阈值
 
         for chunk in stream:
             if len(chunk.choices) == 0:
@@ -73,15 +74,20 @@ class StreamingModelClient:
                 raw_content += content
 
                 # 重复检测：检测类似 "```html\n" 的无限循环
-                if content.strip():
-                    if content == repeat_detector:
-                        repeat_count += 1
-                        if repeat_count >= max_repeat_count:
-                            logger.warning(f"[streaming] 检测到重复输出循环: {repr(content)} 重复 {repeat_count} 次，终止流")
-                            raise ValueError(f"模型输出异常：检测到重复模式 {repr(content[:20])}")
-                    else:
-                        repeat_detector = content
-                        repeat_count = 1
+                repeat_window += content
+                if len(repeat_window) > max_window_size:
+                    repeat_window = repeat_window[-max_window_size:]
+
+                # 只在窗口足够大时检测
+                if len(repeat_window) >= min_pattern_length * max_repeat_count:
+                    # 尝试检测重复模式（从短到长）
+                    for pattern_len in range(min_pattern_length, len(repeat_window) // max_repeat_count + 1):
+                        pattern = repeat_window[-pattern_len:]
+                        # 检查该模式是否在窗口末尾连续重复
+                        check_str = repeat_window[-(pattern_len * max_repeat_count):]
+                        if check_str == pattern * max_repeat_count:
+                            logger.warning(f"[streaming] 检测到重复输出循环: {repr(pattern[:30])} 重复 {max_repeat_count} 次，终止流")
+                            raise ValueError(f"模型输出异常：检测到重复模式 {repr(pattern[:20])}")
 
                 # 记录首个 token 时间
                 if not first_token_received:

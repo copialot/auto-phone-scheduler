@@ -254,3 +254,35 @@ export interface DeviceConfigUpdate {
   unlock_end_y?: number
   unlock_duration?: number
 }
+
+// WiFi 设备配对请求
+export interface PairRequest {
+  host: string
+  port: number
+  pairing_code: string
+}
+
+// 已注册的 WiFi 设备（用于保活和重连）
+export interface RegisteredDevice {
+  address: string
+  model: string | null
+  status: string  // connected, disconnected, reconnecting, failed
+  last_seen: string | null
+  reconnect_attempts: number
+}
+
+// 二维码配对响应
+export interface QRCodePairingResponse {
+  qr_content: string
+  service_name: string
+  password: string
+  session_id: string
+}
+
+// 配对状态响应
+export interface PairingStatusResponse {
+  status: 'waiting' | 'paired' | 'timeout' | 'error'
+  host: string | null
+  port: number | null
+  message: string | null
+}

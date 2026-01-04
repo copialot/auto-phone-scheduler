@@ -10,6 +10,13 @@ from app.database import get_db
 from app.schemas.device import DeviceInfo
 from app.services.adb import run_adb, run_adb_exec
 from app.services.streamer import generate_mjpeg_stream
+from app.services.device_manager import (
+    DeviceConnectionManager,
+    pair_device,
+    generate_pairing_credentials,
+    generate_qr_code_content,
+    QRCodePairingSession,
+)
 from app.models.execution import Execution, ExecutionStatus
 
 router = APIRouter(prefix="/api/devices", tags=["devices"])
@@ -17,12 +24,19 @@ router = APIRouter(prefix="/api/devices", tags=["devices"])
 
 class ConnectRequest(BaseModel):
     address: str  # host:port 格式，例如 192.168.1.100:5555
+    register: bool = True  # 是否注册到连接管理器（用于保活和重连）
 
 
 class ConnectResponse(BaseModel):
     success: bool
     message: str
     serial: str | None = None
+
+
+class PairRequest(BaseModel):
+    host: str  # 设备 IP 地址
+    port: int  # 配对端口（不是连接端口）
+    pairing_code: str  # 6位配对码
 
 
 class KeyEventRequest(BaseModel):
@@ -43,30 +57,48 @@ class TapRequest(BaseModel):
 
 
 async def get_connected_devices() -> list[DeviceInfo]:
-    """获取已连接的ADB设备"""
+    """获取已连接的ADB设备
+
+    注意：Android 15+ 无线调试的设备名可能包含空格，如：
+    adb-2233fd19-9mU6UL (2)._adb-tls-connect._tcp device
+
+    需要使用正则表达式正确解析。
+    """
+    import re
+
     stdout, _ = await run_adb("devices", "-l")
     output = stdout.decode()
 
     devices = []
     lines = output.strip().split("\n")[1:]  # 跳过第一行标题
 
+    # 匹配设备行的正则：serial + 空白 + status + 可选的其他信息
+    # serial 可能包含空格（如 mDNS 名称），但 status 只能是 device/offline/unauthorized 等
+    # 格式示例：
+    #   192.168.0.104:40559          device product:... model:... device:...
+    #   adb-xxx (2)._adb-tls-connect._tcp device
+    device_pattern = re.compile(
+        r'^(.+?)\s+(device|offline|unauthorized|recovery|sideload|bootloader|no permissions)(?:\s+(.*))?$'
+    )
+
     for line in lines:
         if not line.strip():
             continue
 
-        parts = line.split()
-        if len(parts) >= 2:
-            serial = parts[0]
-            status = parts[1]
+        match = device_pattern.match(line)
+        if match:
+            serial = match.group(1).strip()
+            status = match.group(2)
+            extra_info = match.group(3) or ""
 
-            # 解析额外信息
+            # 解析额外信息（model:xxx product:xxx 等）
             model = None
             product = None
-            for part in parts[2:]:
+            for part in extra_info.split():
                 if part.startswith("model:"):
-                    model = part.split(":")[1]
+                    model = part.split(":", 1)[1]
                 elif part.startswith("product:"):
-                    product = part.split(":")[1]
+                    product = part.split(":", 1)[1]
 
             devices.append(
                 DeviceInfo(
@@ -125,6 +157,8 @@ async def connect_device(request: ConnectRequest):
     支持格式：
     - host:port (例如 192.168.1.100:5555)
     - host (默认使用端口 5555)
+
+    连接成功后会自动注册到连接管理器，用于保活和断线重连。
     """
     address = request.address.strip()
 
@@ -137,15 +171,26 @@ async def connect_device(request: ConnectRequest):
         output = stdout.decode() + stderr.decode()
 
         # 检查连接结果
-        if "connected" in output.lower():
+        if "connected" in output.lower() and "cannot" not in output.lower():
             # 连接成功，等待设备就绪
             await asyncio.sleep(1)
+
+            # 注册到连接管理器
+            if request.register:
+                manager = DeviceConnectionManager.get_instance()
+                manager.register_device(address)
+
             return ConnectResponse(
                 success=True,
                 message=f"成功连接到 {address}",
                 serial=address,
             )
         elif "already connected" in output.lower():
+            # 已连接也注册一下
+            if request.register:
+                manager = DeviceConnectionManager.get_instance()
+                manager.register_device(address)
+
             return ConnectResponse(
                 success=True,
                 message=f"设备 {address} 已经连接",
@@ -168,6 +213,7 @@ async def disconnect_device(serial: str):
     """断开远程设备连接
 
     仅支持断开通过 WiFi/网络连接的设备（host:port 格式）
+    断开后会从连接管理器中移除（不再保活和重连）
     """
     # 检查是否是网络设备（包含冒号表示 host:port）
     if ":" not in serial or serial.startswith("emulator"):
@@ -177,6 +223,10 @@ async def disconnect_device(serial: str):
         )
 
     try:
+        # 从连接管理器中移除
+        manager = DeviceConnectionManager.get_instance()
+        manager.unregister_device(serial)
+
         stdout, stderr = await run_adb("disconnect", serial)
         output = stdout.decode() + stderr.decode()
 
@@ -313,3 +363,196 @@ async def release_device(serial: str, db: AsyncSession = Depends(get_db)):
         "message": f"已释放 {len(running_executions)} 个执行记录",
         "released_count": len(running_executions),
     }
+
+
+# ============ WiFi 设备配对和重连 ============
+
+
+class QRCodePairingResponse(BaseModel):
+    qr_content: str  # 二维码内容
+    service_name: str  # 服务名
+    password: str  # 配对密码
+    session_id: str  # 配对会话 ID
+
+
+# 存储活动的配对会话
+_pairing_sessions: dict[str, QRCodePairingSession] = {}
+
+
+@router.get("/pair/qrcode", response_model=QRCodePairingResponse)
+async def get_pairing_qrcode():
+    """生成配对二维码并启动 mDNS 监听（Android 11+ 无线调试）
+
+    工作流程：
+    1. 生成配对凭证和二维码
+    2. 启动 mDNS 服务监听，等待 Android 设备扫码配对
+    3. 返回二维码内容，前端显示二维码供手机扫描
+
+    手机扫码后：
+    1. Android 系统会发布 mDNS 配对服务
+    2. 服务器监听到服务后自动执行 adb pair 配对
+    3. 配对成功后需要调用 /connect 接口连接设备
+
+    使用 /pair/status/{session_id} 轮询配对状态
+    """
+    import uuid
+
+    service_name, password = generate_pairing_credentials()
+    session_id = str(uuid.uuid4())[:8]
+
+    # 创建并启动配对会话
+    session = QRCodePairingSession(service_name, password, timeout=120)
+    try:
+        qr_content = session.start()
+        _pairing_sessions[session_id] = session
+
+        # 设置超时自动清理
+        async def cleanup_session():
+            await asyncio.sleep(130)  # 比配对超时稍长
+            if session_id in _pairing_sessions:
+                _pairing_sessions[session_id].stop()
+                del _pairing_sessions[session_id]
+
+        asyncio.create_task(cleanup_session())
+
+        return QRCodePairingResponse(
+            qr_content=qr_content,
+            service_name=service_name,
+            password=password,
+            session_id=session_id,
+        )
+    except Exception as e:
+        session.stop()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class PairingStatusResponse(BaseModel):
+    status: str  # waiting, paired, timeout, error
+    host: str | None = None
+    port: int | None = None
+    message: str | None = None
+
+
+@router.get("/pair/status/{session_id}", response_model=PairingStatusResponse)
+async def get_pairing_status(session_id: str):
+    """获取配对会话状态
+
+    返回值：
+    - status: waiting (等待扫码), paired (已配对), timeout (超时), error (错误)
+    - host/port: 配对成功时返回设备的 IP 和端口
+    """
+    session = _pairing_sessions.get(session_id)
+    if not session:
+        return PairingStatusResponse(
+            status="timeout",
+            message="配对会话已过期或不存在"
+        )
+
+    paired_device = session.paired_device
+    if paired_device:
+        # 配对成功，清理会话
+        session.stop()
+        del _pairing_sessions[session_id]
+        return PairingStatusResponse(
+            status="paired",
+            host=paired_device["host"],
+            port=paired_device["port"],
+            message="配对成功！请使用返回的 IP 和连接端口进行连接"
+        )
+
+    return PairingStatusResponse(
+        status="waiting",
+        message="等待设备扫码配对..."
+    )
+
+
+@router.delete("/pair/{session_id}")
+async def cancel_pairing(session_id: str):
+    """取消配对会话"""
+    session = _pairing_sessions.get(session_id)
+    if session:
+        session.stop()
+        del _pairing_sessions[session_id]
+        return {"success": True, "message": "配对已取消"}
+    return {"success": False, "message": "配对会话不存在"}
+
+
+@router.post("/pair", response_model=ConnectResponse)
+async def pair_device_endpoint(request: PairRequest):
+    """通过配对码配对设备（Android 11+ 无线调试）
+
+    在手机「开发者选项 → 无线调试 → 使用配对码配对设备」中获取：
+    - host: 设备 IP 地址
+    - port: 配对端口（注意：不是连接端口）
+    - pairing_code: 6位配对码
+
+    配对成功后，还需要调用 /connect 接口连接设备（使用无线调试页面显示的连接端口）
+    """
+    success, message = await pair_device(request.host, request.port, request.pairing_code)
+
+    return ConnectResponse(
+        success=success,
+        message=message,
+        serial=f"{request.host}:{request.port}" if success else None,
+    )
+
+
+class ReconnectResponse(BaseModel):
+    success: bool
+    message: str
+
+
+@router.post("/reconnect/{serial}", response_model=ReconnectResponse)
+async def reconnect_device(serial: str):
+    """强制重连设备
+
+    用于手动触发断线设备的重连
+    """
+    if ":" not in serial or serial.startswith("emulator"):
+        return ReconnectResponse(
+            success=False,
+            message="只能重连网络设备",
+        )
+
+    manager = DeviceConnectionManager.get_instance()
+    success, message = await manager.force_reconnect(serial)
+
+    return ReconnectResponse(success=success, message=message)
+
+
+class RegisteredDevice(BaseModel):
+    address: str
+    model: str | None = None
+    status: str
+    last_seen: str | None = None
+    reconnect_attempts: int = 0
+
+
+@router.get("/registered", response_model=list[RegisteredDevice])
+async def get_registered_devices():
+    """获取所有已注册的 WiFi 设备（用于保活和重连的设备列表）"""
+    manager = DeviceConnectionManager.get_instance()
+    devices = manager.get_registered_devices()
+
+    return [
+        RegisteredDevice(
+            address=d["address"],
+            model=d.get("model"),
+            status=d.get("status", "unknown"),
+            last_seen=d["last_seen"].isoformat() if d.get("last_seen") else None,
+            reconnect_attempts=d.get("reconnect_attempts", 0),
+        )
+        for d in devices
+    ]
+
+
+@router.delete("/registered/{serial}")
+async def unregister_device(serial: str):
+    """取消注册设备（不再保活和重连，但不断开连接）"""
+    if ":" not in serial or serial.startswith("emulator"):
+        return {"success": False, "message": "只能取消注册网络设备"}
+
+    manager = DeviceConnectionManager.get_instance()
+    manager.unregister_device(serial)
+
+    return {"success": True, "message": f"已取消注册 {serial}"}

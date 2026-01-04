@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { QRCodeSVG } from 'qrcode.react'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -34,7 +35,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { settingsApi, devicesApi, notificationsApi, appPackagesApi, deviceConfigsApi } from '@/api/client'
-import type { NotificationChannel, NotificationChannelCreate, NotificationType, AppPackage, AppPackageCreate, DeviceConfigUpdate } from '@/types'
+import type { NotificationChannel, NotificationChannelCreate, NotificationType, AppPackage, AppPackageCreate, DeviceConfigUpdate, RegisteredDevice } from '@/types'
 import {
   RefreshCw,
   Smartphone,
@@ -56,6 +57,9 @@ import {
   Power,
   Unlock,
   MousePointer,
+  QrCode,
+  RotateCw,
+  Link,
 } from 'lucide-react'
 
 // API 配置组件
@@ -273,6 +277,18 @@ function DeviceSettings() {
   const [remoteAddress, setRemoteAddress] = useState('')
   const [selectedDeviceSerial, setSelectedDeviceSerial] = useState<string | null>(null)
   const [isConfigDialogOpen, setIsConfigDialogOpen] = useState(false)
+  const [isPairDialogOpen, setIsPairDialogOpen] = useState(false)
+  const [isQRCodeDialogOpen, setIsQRCodeDialogOpen] = useState(false)
+  const [qrCodeData, setQRCodeData] = useState<{ qr_content: string; password: string; session_id: string } | null>(null)
+  const [pairingStatus, setPairingStatus] = useState<'waiting' | 'paired' | 'timeout' | 'error'>('waiting')
+  const [pairedDevice, setPairedDevice] = useState<{ host: string; port: number } | null>(null)
+  const [qrConnectAddress, setQrConnectAddress] = useState('')
+  const [pairFormData, setPairFormData] = useState({
+    host: '',
+    port: '',
+    pairing_code: '',
+    connect_port: '',
+  })
   const [configFormData, setConfigFormData] = useState<DeviceConfigUpdate>({
     wake_enabled: true,
     wake_command: '',
@@ -303,6 +319,11 @@ function DeviceSettings() {
     queryFn: deviceConfigsApi.list,
   })
 
+  const { data: registeredDevices = [] } = useQuery({
+    queryKey: ['registered-devices'],
+    queryFn: devicesApi.getRegistered,
+  })
+
   const updateSettingsMutation = useMutation({
     mutationFn: settingsApi.update,
     onSuccess: () => {
@@ -319,12 +340,13 @@ function DeviceSettings() {
   })
 
   const connectDeviceMutation = useMutation({
-    mutationFn: devicesApi.connect,
+    mutationFn: (address: string) => devicesApi.connect(address, true),
     onSuccess: (data) => {
       if (data.success) {
         toast.success(data.message)
         setRemoteAddress('')
         queryClient.invalidateQueries({ queryKey: ['devices'] })
+        queryClient.invalidateQueries({ queryKey: ['registered-devices'] })
       } else {
         toast.error(data.message, {
           description: 'Android 11+ 无线调试需要先在开发者选项中进行配对：开发者选项 → 无线调试 → 使用配对码配对设备',
@@ -352,6 +374,92 @@ function DeviceSettings() {
       } else {
         toast.error(data.message)
       }
+    },
+  })
+
+  const pairDeviceMutation = useMutation({
+    mutationFn: devicesApi.pair,
+    onSuccess: (data) => {
+      if (data.success) {
+        toast.success(data.message, { description: '请使用下方的连接端口连接设备' })
+      } else {
+        toast.error(data.message)
+      }
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || '配对失败')
+    },
+  })
+
+  const reconnectDeviceMutation = useMutation({
+    mutationFn: devicesApi.reconnect,
+    onSuccess: (data) => {
+      if (data.success) {
+        toast.success(data.message)
+        queryClient.invalidateQueries({ queryKey: ['devices'] })
+        queryClient.invalidateQueries({ queryKey: ['registered-devices'] })
+      } else {
+        toast.error(data.message)
+      }
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || '重连失败')
+    },
+  })
+
+  const getQRCodeMutation = useMutation({
+    mutationFn: devicesApi.getPairingQRCode,
+    onSuccess: (data) => {
+      setQRCodeData({
+        qr_content: data.qr_content,
+        password: data.password,
+        session_id: data.session_id
+      })
+      setPairingStatus('waiting')
+      setPairedDevice(null)
+      setQrConnectAddress('')
+      setIsQRCodeDialogOpen(true)
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || '生成二维码失败')
+    },
+  })
+
+  // 轮询配对状态
+  useEffect(() => {
+    if (!isQRCodeDialogOpen || !qrCodeData?.session_id || pairingStatus !== 'waiting') {
+      return
+    }
+
+    const pollStatus = async () => {
+      try {
+        const status = await devicesApi.getPairingStatus(qrCodeData.session_id)
+        setPairingStatus(status.status)
+        if (status.status === 'paired' && status.host && status.port) {
+          setPairedDevice({ host: status.host, port: status.port })
+          toast.success('配对成功！', { description: `设备 ${status.host} 已配对` })
+        }
+      } catch {
+        // 忽略轮询错误
+      }
+    }
+
+    const interval = setInterval(pollStatus, 2000)
+    return () => clearInterval(interval)
+  }, [isQRCodeDialogOpen, qrCodeData?.session_id, pairingStatus])
+
+  const unregisterDeviceMutation = useMutation({
+    mutationFn: devicesApi.unregister,
+    onSuccess: (data) => {
+      if (data.success) {
+        toast.success(data.message)
+        queryClient.invalidateQueries({ queryKey: ['registered-devices'] })
+      } else {
+        toast.error(data.message)
+      }
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || '取消注册失败')
     },
   })
 
@@ -546,9 +654,27 @@ function DeviceSettings() {
               <Wifi className={`h-4 w-4 mr-2 ${connectDeviceMutation.isPending ? 'animate-pulse' : ''}`} />
               连接
             </Button>
+            <Button
+              variant="outline"
+              onClick={() => getQRCodeMutation.mutate()}
+              disabled={getQRCodeMutation.isPending}
+              title="扫码配对"
+            >
+              <QrCode className={`h-4 w-4 ${getQRCodeMutation.isPending ? 'animate-pulse' : ''}`} />
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setPairFormData({ host: '', port: '', pairing_code: '', connect_port: '' })
+                setIsPairDialogOpen(true)
+              }}
+              title="手动输入配对码"
+            >
+              <Link className="h-4 w-4" />
+            </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            WiFi 连接: 确保设备与电脑在同一局域网。Android 11+ 需先在「开发者选项 → 无线调试」中配对设备；Android 10 及以下需执行 adb tcpip 5555
+            WiFi 连接: 确保设备与电脑在同一局域网。Android 11+ 点击「配对」按钮使用配对码连接；Android 10 及以下需执行 adb tcpip 5555 后直接连接
           </p>
 
           {/* 设备列表 */}
@@ -643,6 +769,17 @@ function DeviceSettings() {
                           选择
                         </Button>
                       )}
+                      {isNetworkDevice && !isOnline && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => reconnectDeviceMutation.mutate(device.serial)}
+                          disabled={reconnectDeviceMutation.isPending}
+                          title="重新连接"
+                        >
+                          <RotateCw className={`h-4 w-4 ${reconnectDeviceMutation.isPending ? 'animate-spin' : ''}`} />
+                        </Button>
+                      )}
                       {isNetworkDevice && (
                         <Button
                           size="sm"
@@ -662,6 +799,76 @@ function DeviceSettings() {
           )}
         </CardContent>
       </Card>
+
+      {/* 已注册设备（保活重连） */}
+      {registeredDevices.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg">已注册设备 (保活)</CardTitle>
+            <CardDescription>
+              这些 WiFi 设备会自动保持连接，断线后会自动尝试重连
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {registeredDevices.map((device: RegisteredDevice) => {
+                const statusColors: Record<string, string> = {
+                  connected: 'bg-green-500',
+                  disconnected: 'bg-gray-400',
+                  reconnecting: 'bg-yellow-500',
+                  failed: 'bg-red-500',
+                }
+                const statusLabels: Record<string, string> = {
+                  connected: '已连接',
+                  disconnected: '已断开',
+                  reconnecting: '重连中',
+                  failed: '重连失败',
+                }
+
+                return (
+                  <div
+                    key={device.address}
+                    className="flex items-center justify-between p-3 rounded-lg bg-muted/50"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className={`w-2 h-2 rounded-full ${statusColors[device.status] || 'bg-gray-400'}`} />
+                      <div>
+                        <p className="font-medium">{device.address}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {statusLabels[device.status] || device.status}
+                          {device.reconnect_attempts > 0 && ` (重试 ${device.reconnect_attempts} 次)`}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex gap-1">
+                      {device.status !== 'connected' && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => reconnectDeviceMutation.mutate(device.address)}
+                          disabled={reconnectDeviceMutation.isPending}
+                          title="重新连接"
+                        >
+                          <RotateCw className={`h-4 w-4 ${reconnectDeviceMutation.isPending ? 'animate-spin' : ''}`} />
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => unregisterDeviceMutation.mutate(device.address)}
+                        disabled={unregisterDeviceMutation.isPending}
+                        title="取消注册（停止保活）"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* 设备配置对话框 */}
       <Dialog open={isConfigDialogOpen} onOpenChange={setIsConfigDialogOpen}>
@@ -940,6 +1147,189 @@ function DeviceSettings() {
               </Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* 配对对话框 */}
+      <Dialog open={isPairDialogOpen} onOpenChange={setIsPairDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>无线调试配对 (Android 11+)</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="p-4 rounded-lg bg-muted">
+              <p className="text-sm mb-2">在手机上操作：</p>
+              <ol className="text-sm text-muted-foreground space-y-1 list-decimal list-inside">
+                <li>打开「设置 → 开发者选项 → 无线调试」</li>
+                <li>点击「使用配对码配对设备」</li>
+                <li>将显示的 IP 地址、端口和配对码填入下方</li>
+              </ol>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="pair_host">设备 IP 地址</Label>
+                <Input
+                  id="pair_host"
+                  value={pairFormData.host}
+                  onChange={(e) => setPairFormData({ ...pairFormData, host: e.target.value })}
+                  placeholder="192.168.1.100"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="pair_port">配对端口</Label>
+                <Input
+                  id="pair_port"
+                  value={pairFormData.port}
+                  onChange={(e) => setPairFormData({ ...pairFormData, port: e.target.value })}
+                  placeholder="37123"
+                />
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="pairing_code">配对码 (6位数字)</Label>
+              <Input
+                id="pairing_code"
+                value={pairFormData.pairing_code}
+                onChange={(e) => setPairFormData({ ...pairFormData, pairing_code: e.target.value })}
+                placeholder="123456"
+                maxLength={6}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="connect_port">连接端口 (可选)</Label>
+              <Input
+                id="connect_port"
+                value={pairFormData.connect_port}
+                onChange={(e) => setPairFormData({ ...pairFormData, connect_port: e.target.value })}
+                placeholder="无线调试页面显示的端口，如 5555"
+              />
+              <p className="text-xs text-muted-foreground">
+                填写后配对成功会自动连接，也可以配对后手动连接
+              </p>
+            </div>
+
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setIsPairDialogOpen(false)}>
+                取消
+              </Button>
+              <Button
+                onClick={async () => {
+                  if (!pairFormData.host || !pairFormData.port || !pairFormData.pairing_code) {
+                    toast.error('请填写完整的配对信息')
+                    return
+                  }
+                  const result = await pairDeviceMutation.mutateAsync({
+                    host: pairFormData.host,
+                    port: parseInt(pairFormData.port),
+                    pairing_code: pairFormData.pairing_code,
+                  })
+                  if (result.success && pairFormData.connect_port) {
+                    // 配对成功后自动连接
+                    const address = `${pairFormData.host}:${pairFormData.connect_port}`
+                    connectDeviceMutation.mutate(address)
+                    setIsPairDialogOpen(false)
+                  } else if (result.success) {
+                    setIsPairDialogOpen(false)
+                  }
+                }}
+                disabled={pairDeviceMutation.isPending}
+              >
+                <Link className={`h-4 w-4 mr-2 ${pairDeviceMutation.isPending ? 'animate-pulse' : ''}`} />
+                配对
+              </Button>
+            </DialogFooter>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 二维码配对对话框 */}
+      <Dialog open={isQRCodeDialogOpen} onOpenChange={(open) => {
+        if (!open && qrCodeData?.session_id) {
+          devicesApi.cancelPairing(qrCodeData.session_id).catch(() => {})
+        }
+        setIsQRCodeDialogOpen(open)
+      }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>扫码配对 (Android 11+)</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="p-4 rounded-lg bg-muted">
+              <p className="text-sm mb-2">在手机上操作：</p>
+              <ol className="text-sm text-muted-foreground space-y-1 list-decimal list-inside">
+                <li>打开「设置 → 开发者选项 → 无线调试」</li>
+                <li>点击「使用二维码配对设备」</li>
+                <li>扫描下方二维码</li>
+              </ol>
+            </div>
+
+            {qrCodeData && pairingStatus === 'waiting' && (
+              <div className="flex flex-col items-center gap-4">
+                <div className="p-4 bg-white rounded-lg">
+                  <QRCodeSVG
+                    value={qrCodeData.qr_content}
+                    size={200}
+                    level="M"
+                  />
+                </div>
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                  等待设备扫码...
+                </div>
+                <p className="text-xs text-muted-foreground text-center">
+                  配对码: <span className="font-mono font-bold">{qrCodeData.password}</span>
+                </p>
+              </div>
+            )}
+
+            {pairingStatus === 'paired' && pairedDevice && (
+              <div className="flex flex-col items-center gap-4 p-4 rounded-lg bg-green-50 dark:bg-green-950">
+                <CheckCircle className="h-12 w-12 text-green-500" />
+                <div className="text-center">
+                  <p className="font-medium text-green-700 dark:text-green-300">配对成功！</p>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    设备 IP: {pairedDevice.host}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <Label htmlFor="qr_connect_port">连接地址</Label>
+              <div className="flex gap-2">
+                <Input
+                  id="qr_connect_port"
+                  value={qrConnectAddress}
+                  onChange={(e) => setQrConnectAddress(e.target.value)}
+                  placeholder={pairedDevice ? `${pairedDevice.host}:连接端口` : "无线调试页面的 IP:端口"}
+                />
+                <Button
+                  onClick={() => {
+                    let address = qrConnectAddress.trim()
+                    // 如果只输入了端口号且已配对，自动拼接 IP
+                    if (pairedDevice && address && !address.includes(':')) {
+                      address = `${pairedDevice.host}:${address}`
+                    }
+                    if (address) {
+                      connectDeviceMutation.mutate(address)
+                      setIsQRCodeDialogOpen(false)
+                    }
+                  }}
+                  disabled={connectDeviceMutation.isPending || !qrConnectAddress.trim()}
+                >
+                  连接
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {pairingStatus === 'paired'
+                  ? `已配对设备 IP: ${pairedDevice?.host}，请输入无线调试页面显示的连接端口（注意不是配对端口）`
+                  : '配对成功后，输入无线调试页面显示的 IP 地址和端口进行连接'}
+              </p>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

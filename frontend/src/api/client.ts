@@ -21,6 +21,10 @@ import type {
   AppPackageUpdate,
   DeviceConfig,
   DeviceConfigUpdate,
+  PairRequest,
+  RegisteredDevice,
+  QRCodePairingResponse,
+  PairingStatusResponse,
 } from '@/types'
 
 const api = axios.create({
@@ -79,8 +83,10 @@ export interface DeviceBusyStatus {
 export const devicesApi = {
   list: () => api.get<Device[]>('/devices').then(r => r.data),
   refresh: () => api.post<Device[]>('/devices/refresh').then(r => r.data),
-  connect: (address: string) => api.post<ConnectResponse>('/devices/connect', { address }).then(r => r.data),
-  disconnect: (serial: string) => api.post<ConnectResponse>(`/devices/disconnect/${encodeURIComponent(serial)}`).then(r => r.data),
+  connect: (address: string, register = true) =>
+    api.post<ConnectResponse>('/devices/connect', { address, register }).then(r => r.data),
+  disconnect: (serial: string) =>
+    api.post<ConnectResponse>(`/devices/disconnect/${encodeURIComponent(serial)}`).then(r => r.data),
   getStreamUrl: (serial: string) => `${api.defaults.baseURL}/devices/${serial}/stream`,
   getScreenshotUrl: (serial: string) => `${api.defaults.baseURL}/devices/${serial}/screenshot`,
   // 设备控制
@@ -99,6 +105,21 @@ export const devicesApi = {
     api.post<{ success: boolean; message: string; released_count: number }>(
       `/devices/${encodeURIComponent(serial)}/release`
     ).then(r => r.data),
+  // WiFi 设备配对和重连
+  pair: (data: PairRequest) =>
+    api.post<ConnectResponse>('/devices/pair', data).then(r => r.data),
+  getPairingQRCode: () =>
+    api.get<QRCodePairingResponse>('/devices/pair/qrcode').then(r => r.data),
+  getPairingStatus: (sessionId: string) =>
+    api.get<PairingStatusResponse>(`/devices/pair/status/${sessionId}`).then(r => r.data),
+  cancelPairing: (sessionId: string) =>
+    api.delete<{ success: boolean; message: string }>(`/devices/pair/${sessionId}`).then(r => r.data),
+  reconnect: (serial: string) =>
+    api.post<{ success: boolean; message: string }>(`/devices/reconnect/${encodeURIComponent(serial)}`).then(r => r.data),
+  // 已注册设备管理
+  getRegistered: () => api.get<RegisteredDevice[]>('/devices/registered').then(r => r.data),
+  unregister: (serial: string) =>
+    api.delete<{ success: boolean; message: string }>(`/devices/registered/${encodeURIComponent(serial)}`).then(r => r.data),
 }
 
 // Settings

@@ -279,7 +279,7 @@ function DeviceSettings() {
   const [isConfigDialogOpen, setIsConfigDialogOpen] = useState(false)
   const [isPairDialogOpen, setIsPairDialogOpen] = useState(false)
   const [isQRCodeDialogOpen, setIsQRCodeDialogOpen] = useState(false)
-  const [qrCodeData, setQRCodeData] = useState<{ qr_content: string; password: string; session_id: string } | null>(null)
+  const [qrCodeData, setQRCodeData] = useState<{ qr_content: string; password: string; session_id: string; warning: string | null } | null>(null)
   const [pairingStatus, setPairingStatus] = useState<'waiting' | 'paired' | 'timeout' | 'error'>('waiting')
   const [pairedDevice, setPairedDevice] = useState<{ host: string; port: number } | null>(null)
   const [qrConnectAddress, setQrConnectAddress] = useState('')
@@ -413,7 +413,8 @@ function DeviceSettings() {
       setQRCodeData({
         qr_content: data.qr_content,
         password: data.password,
-        session_id: data.session_id
+        session_id: data.session_id,
+        warning: data.warning,
       })
       setPairingStatus('waiting')
       setPairedDevice(null)
@@ -1265,6 +1266,14 @@ function DeviceSettings() {
                 <li>扫描下方二维码</li>
               </ol>
             </div>
+
+            {qrCodeData?.warning && (
+              <div className="p-3 rounded-lg bg-yellow-50 dark:bg-yellow-950 border border-yellow-200 dark:border-yellow-800">
+                <p className="text-sm text-yellow-700 dark:text-yellow-300">
+                  ⚠️ {qrCodeData.warning}
+                </p>
+              </div>
+            )}
 
             {qrCodeData && pairingStatus === 'waiting' && (
               <div className="flex flex-col items-center gap-4">

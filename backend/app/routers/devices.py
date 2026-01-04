@@ -373,6 +373,22 @@ class QRCodePairingResponse(BaseModel):
     service_name: str  # 服务名
     password: str  # 配对密码
     session_id: str  # 配对会话 ID
+    warning: str | None = None  # 容器环境警告信息
+
+
+def is_running_in_container() -> bool:
+    """检测是否在 Docker 容器中运行"""
+    import os
+    # 检查 /.dockerenv 文件或 cgroup
+    if os.path.exists("/.dockerenv"):
+        return True
+    try:
+        with open("/proc/1/cgroup", "r") as f:
+            return "docker" in f.read() or "kubepods" in f.read()
+    except Exception:
+        pass
+    # 检查环境变量（我们在 docker-compose 中设置了 ADB_SERVER_SOCKET）
+    return os.environ.get("ADB_SERVER_SOCKET") is not None
 
 
 # 存储活动的配对会话
@@ -394,11 +410,20 @@ async def get_pairing_qrcode():
     3. 配对成功后需要调用 /connect 接口连接设备
 
     使用 /pair/status/{session_id} 轮询配对状态
+
+    注意：在 Docker 容器中运行时，mDNS 服务发现可能无法正常工作，
+    建议使用手动配对方式（输入配对码）。
     """
     import uuid
 
     service_name, password = generate_pairing_credentials()
     session_id = str(uuid.uuid4())[:8]
+
+    # 检测是否在容器中运行
+    in_container = is_running_in_container()
+    warning = None
+    if in_container:
+        warning = "检测到容器环境，mDNS 服务发现可能无法正常工作。建议使用手动配对方式：点击右侧链接图标，输入手机上显示的 IP、配对端口和配对码。"
 
     # 创建并启动配对会话
     session = QRCodePairingSession(service_name, password, timeout=120)
@@ -420,6 +445,7 @@ async def get_pairing_qrcode():
             service_name=service_name,
             password=password,
             session_id=session_id,
+            warning=warning,
         )
     except Exception as e:
         session.stop()

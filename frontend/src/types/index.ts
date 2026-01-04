@@ -277,6 +277,7 @@ export interface QRCodePairingResponse {
   service_name: string
   password: string
   session_id: string
+  warning: string | null  // 容器环境警告信息
 }
 
 // 配对状态响应

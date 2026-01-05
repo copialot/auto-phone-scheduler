@@ -4,6 +4,8 @@ import threading
 import time
 from dataclasses import dataclass
 
+from app.services.adb import get_adb_command
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,7 +35,7 @@ def get_screen_guard_config() -> ScreenGuardConfig | None:
 
 
 def _adb_cmd_prefix(device_id: str | None) -> list[str]:
-    cmd = ["adb"]
+    cmd = get_adb_command()
     if device_id:
         cmd.extend(["-s", device_id])
     return cmd
@@ -174,4 +176,3 @@ def ensure_device_awake(device_id: str | None) -> None:
                 time.sleep(0.5)
 
         raise RuntimeError(f"设备解锁失败：重试 {max_retries} 次后仍处于锁屏状态")
-

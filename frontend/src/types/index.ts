@@ -219,6 +219,7 @@ export interface DeviceConfig {
   device_serial: string
   wake_enabled: boolean
   wake_command: string | null
+  screen_guard_enabled: boolean
   unlock_enabled: boolean
   unlock_type: 'swipe' | 'longpress' | null
   unlock_start_x: number | null
@@ -234,6 +235,7 @@ export interface DeviceConfigCreate {
   device_serial: string
   wake_enabled?: boolean
   wake_command?: string
+  screen_guard_enabled?: boolean
   unlock_enabled?: boolean
   unlock_type?: 'swipe' | 'longpress'
   unlock_start_x?: number
@@ -246,6 +248,7 @@ export interface DeviceConfigCreate {
 export interface DeviceConfigUpdate {
   wake_enabled?: boolean
   wake_command?: string
+  screen_guard_enabled?: boolean
   unlock_enabled?: boolean
   unlock_type?: 'swipe' | 'longpress'
   unlock_start_x?: number

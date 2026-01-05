@@ -16,6 +16,9 @@ class DeviceConfig(Base):
     # 唤醒命令类型: keyevent (默认使用 KEYCODE_WAKEUP)
     wake_command: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # 屏幕守护：在任务执行过程中（每次截图前/动作执行前）检测并必要时唤醒/解锁
+    screen_guard_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # 解锁配置
     unlock_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     # 解锁类型: swipe (滑动) 或 longpress (长按)

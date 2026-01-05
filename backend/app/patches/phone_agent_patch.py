@@ -48,6 +48,7 @@ def apply_patches():
     """Apply all patches to phone_agent library."""
     _patch_model_client_parse_response()
     _patch_parse_action()
+    _patch_screen_guard_hooks()
     _extend_app_packages()
 
 
@@ -247,6 +248,34 @@ def _extend_app_packages():
             APP_PACKAGES[app_name] = package_name
 
 
+def _patch_screen_guard_hooks():
+    """
+    在 phone_agent 关键节点插入“屏幕守护”钩子：
+    - 截图前：避免 Wait/模型响应过久导致下一步截到黑屏
+    - 动作执行前：避免“唤醒后等待模型输出太久又熄屏”，动作落在锁屏/黑屏上
+
+    守护是否启用由 app.services.screen_guard 的线程局部配置决定。
+    """
+    from phone_agent.device_factory import DeviceFactory
+    from phone_agent.actions.handler import ActionHandler
+
+    original_get_screenshot = DeviceFactory.get_screenshot
+    original_execute = ActionHandler.execute
+
+    def patched_get_screenshot(self, device_id: str | None = None, timeout: int = 10):
+        from app.services.screen_guard import ensure_device_awake
+        ensure_device_awake(device_id)
+        return original_get_screenshot(self, device_id, timeout)
+
+    def patched_execute(self, action: dict, screen_width: int, screen_height: int):
+        from app.services.screen_guard import ensure_device_awake
+        ensure_device_awake(self.device_id)
+        return original_execute(self, action, screen_width, screen_height)
+
+    DeviceFactory.get_screenshot = patched_get_screenshot
+    ActionHandler.execute = patched_execute
+
+
 async def load_custom_app_packages():
     """
     从数据库加载自定义 APP 包名映射并合并到 APP_PACKAGES。
@@ -297,4 +326,3 @@ def sync_load_custom_app_packages():
     except RuntimeError:
         # 没有事件循环，创建新的
         asyncio.run(load_custom_app_packages())
-

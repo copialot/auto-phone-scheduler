@@ -60,6 +60,7 @@ import {
   QrCode,
   RotateCw,
   Link,
+  Shield,
 } from 'lucide-react'
 
 // API 配置组件
@@ -292,6 +293,7 @@ function DeviceSettings() {
   const [configFormData, setConfigFormData] = useState<DeviceConfigUpdate>({
     wake_enabled: true,
     wake_command: '',
+    screen_guard_enabled: false,
     unlock_enabled: false,
     unlock_type: undefined,
     unlock_start_x: undefined,
@@ -531,6 +533,7 @@ function DeviceSettings() {
       setConfigFormData({
         wake_enabled: existingConfig.wake_enabled,
         wake_command: existingConfig.wake_command || '',
+        screen_guard_enabled: existingConfig.screen_guard_enabled ?? false,
         unlock_enabled: existingConfig.unlock_enabled,
         unlock_type: existingConfig.unlock_type || undefined,
         unlock_start_x: existingConfig.unlock_start_x ?? undefined,
@@ -543,6 +546,7 @@ function DeviceSettings() {
       setConfigFormData({
         wake_enabled: true,
         wake_command: '',
+        screen_guard_enabled: false,
         unlock_enabled: false,
         unlock_type: undefined,
         unlock_start_x: undefined,
@@ -721,6 +725,12 @@ function DeviceSettings() {
                         </p>
                         {deviceConfig && (
                           <div className="flex gap-1 mt-1">
+                            {deviceConfig.screen_guard_enabled && (
+                              <Badge variant="outline" className="text-xs">
+                                <Shield className="h-3 w-3 mr-1" />
+                                守护
+                              </Badge>
+                            )}
                             {deviceConfig.wake_enabled && (
                               <Badge variant="outline" className="text-xs">
                                 <Power className="h-3 w-3 mr-1" />
@@ -878,6 +888,27 @@ function DeviceSettings() {
             <DialogTitle>设备唤醒解锁配置</DialogTitle>
           </DialogHeader>
           <form onSubmit={handleConfigSubmit} className="space-y-6">
+            {/* 屏幕守护 */}
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Shield className="h-5 w-5" />
+                  <Label className="text-base font-medium">屏幕守护</Label>
+                </div>
+                <Switch
+                  checked={configFormData.screen_guard_enabled}
+                  onCheckedChange={(checked) =>
+                    setConfigFormData({ ...configFormData, screen_guard_enabled: checked })
+                  }
+                />
+              </div>
+              <div className="pl-7">
+                <p className="text-xs text-muted-foreground">
+                  开启后，在每次截图前与动作执行前自动检测屏幕状态，必要时唤醒/解锁，避免模型响应慢导致熄屏后动作失败
+                </p>
+              </div>
+            </div>
+
             {/* 唤醒配置 */}
             <div className="space-y-4">
               <div className="flex items-center justify-between">

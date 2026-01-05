@@ -606,6 +606,29 @@ class SchedulerService:
                 await self._send_notifications(session, task, execution)
                 return
 
+            # 构建屏幕守护配置（传递到 agent 执行线程）
+            from app.models.device_config import DeviceConfig
+            from app.services.screen_guard import ScreenGuardConfig
+
+            screen_guard_config: ScreenGuardConfig | None = None
+            result = await session.execute(
+                select(DeviceConfig).where(DeviceConfig.device_serial == device_serial)
+            )
+            device_config = result.scalar_one_or_none()
+            if device_config and device_config.screen_guard_enabled:
+                screen_guard_config = ScreenGuardConfig(
+                    enabled=True,
+                    wake=bool(task.wake_before_run and device_config.wake_enabled),
+                    unlock=bool(task.unlock_before_run and device_config.unlock_enabled),
+                    wake_command=device_config.wake_command,
+                    unlock_type=device_config.unlock_type,
+                    unlock_start_x=device_config.unlock_start_x,
+                    unlock_start_y=device_config.unlock_start_y,
+                    unlock_end_x=device_config.unlock_end_x,
+                    unlock_end_y=device_config.unlock_end_y,
+                    unlock_duration=device_config.unlock_duration,
+                )
+
             base_url = db_settings.get("autoglm_base_url") or settings.autoglm_base_url
             api_key = db_settings.get("autoglm_api_key") or settings.autoglm_api_key
             model = db_settings.get("autoglm_model") or settings.autoglm_model
@@ -639,6 +662,8 @@ class SchedulerService:
 
                 def run_agent_sync():
                     """在线程池中同步运行 agent，通过队列传递步骤"""
+                    from app.services.screen_guard import set_screen_guard_config
+                    set_screen_guard_config(screen_guard_config)
                     model_config = ModelConfig(
                         base_url=base_url,
                         api_key=api_key,
@@ -711,6 +736,7 @@ class SchedulerService:
                         result_holder["error_msg"] = str(e)
                     finally:
                         agent.reset()
+                        set_screen_guard_config(None)
                         # 发送完成信号
                         step_queue.put(("done", None))
 
@@ -1020,6 +1046,29 @@ class SchedulerService:
                 await self._send_notifications(session, task, execution)
                 return
 
+            # 构建屏幕守护配置（传递到 agent 执行线程）
+            from app.models.device_config import DeviceConfig
+            from app.services.screen_guard import ScreenGuardConfig
+
+            screen_guard_config: ScreenGuardConfig | None = None
+            result = await session.execute(
+                select(DeviceConfig).where(DeviceConfig.device_serial == device_serial)
+            )
+            device_config = result.scalar_one_or_none()
+            if device_config and device_config.screen_guard_enabled:
+                screen_guard_config = ScreenGuardConfig(
+                    enabled=True,
+                    wake=bool(task.wake_before_run and device_config.wake_enabled),
+                    unlock=bool(task.unlock_before_run and device_config.unlock_enabled),
+                    wake_command=device_config.wake_command,
+                    unlock_type=device_config.unlock_type,
+                    unlock_start_x=device_config.unlock_start_x,
+                    unlock_start_y=device_config.unlock_start_y,
+                    unlock_end_x=device_config.unlock_end_x,
+                    unlock_end_y=device_config.unlock_end_y,
+                    unlock_duration=device_config.unlock_duration,
+                )
+
             base_url = db_settings.get("autoglm_base_url") or settings.autoglm_base_url
             api_key = db_settings.get("autoglm_api_key") or settings.autoglm_api_key
             model = db_settings.get("autoglm_model") or settings.autoglm_model
@@ -1057,7 +1106,9 @@ class SchedulerService:
 
                 def run_agent_sync():
                     """在线程池中同步运行 agent，每步通过队列实时通知"""
+                    from app.services.screen_guard import set_screen_guard_config
                     # 应用流式补丁
+                    set_screen_guard_config(screen_guard_config)
                     original_client = patch_phone_agent(token_callback)
 
                     try:
@@ -1141,9 +1192,11 @@ class SchedulerService:
                         finally:
                             agent.reset()
                             stop_event.set()  # 通知保存任务停止
+                            set_screen_guard_config(None)
 
                         return success, error_msg
                     finally:
+                        set_screen_guard_config(None)
                         # 恢复原始 ModelClient
                         unpatch_phone_agent(original_client)
 

@@ -81,6 +81,27 @@ async def execute_stream(request: ExecuteRequest, db: AsyncSession = Depends(get
     device_serial = active_device.serial
     device_model = active_device.model
 
+    # 构建屏幕守护配置（传递到 agent 执行线程）
+    from app.models.device_config import DeviceConfig
+    from app.services.screen_guard import ScreenGuardConfig
+
+    screen_guard_config: ScreenGuardConfig | None = None
+    result = await db.execute(select(DeviceConfig).where(DeviceConfig.device_serial == device_serial))
+    device_config = result.scalar_one_or_none()
+    if device_config and device_config.screen_guard_enabled:
+        screen_guard_config = ScreenGuardConfig(
+            enabled=True,
+            wake=bool(device_config.wake_enabled),
+            unlock=bool(device_config.unlock_enabled),
+            wake_command=device_config.wake_command,
+            unlock_type=device_config.unlock_type,
+            unlock_start_x=device_config.unlock_start_x,
+            unlock_start_y=device_config.unlock_start_y,
+            unlock_end_x=device_config.unlock_end_x,
+            unlock_end_y=device_config.unlock_end_y,
+            unlock_duration=device_config.unlock_duration,
+        )
+
     # 获取系统提示词规则
     autoglm_service = AutoGLMService()
     system_prompt, prefix_prompt, suffix_prompt = await autoglm_service.get_system_prompts(
@@ -114,12 +135,14 @@ async def execute_stream(request: ExecuteRequest, db: AsyncSession = Depends(get
         from phone_agent.model import ModelConfig
         from phone_agent.agent import AgentConfig
         from phone_agent.config import get_system_prompt
+        from app.services.screen_guard import set_screen_guard_config
 
         # 应用流式补丁
         original_client = patch_phone_agent(token_callback)
 
         agent = None
         try:
+            set_screen_guard_config(screen_guard_config)
             model_config = ModelConfig(
                 base_url=base_url,
                 api_key=api_key,
@@ -329,6 +352,7 @@ async def execute_stream(request: ExecuteRequest, db: AsyncSession = Depends(get
             if agent:
                 agent.reset()
             unpatch_phone_agent(original_client)
+            set_screen_guard_config(None)
             stop_event.set()
             # 清理全局停止事件
             _debug_stop_events.pop(device_serial, None)

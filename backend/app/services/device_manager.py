@@ -254,8 +254,10 @@ class DeviceConnectionManager:
     CHECK_INTERVAL = 30
     # 重连间隔（秒）
     RECONNECT_INTERVAL = 10
-    # 最大重连尝试次数
-    MAX_RECONNECT_ATTEMPTS = 3
+    # 最大重连尝试次数（达到后会重置计数器继续尝试，但间隔更长）
+    MAX_RECONNECT_ATTEMPTS = 5
+    # 失败后的重连间隔（秒）- 达到上限后使用此间隔
+    FAILED_RECONNECT_INTERVAL = 120
 
     def __init__(self):
         # 已知的 WiFi 设备地址 -> 设备信息
@@ -416,6 +418,12 @@ class DeviceConnectionManager:
             logger.error(f"获取设备列表失败: {e}")
             return []
 
+    def _is_remote_adb_server(self) -> bool:
+        """检查是否使用远程 ADB server"""
+        from app.services.adb import _parse_adb_socket
+        host, port = _parse_adb_socket()
+        return host is not None and port is not None
+
     async def _reconnect_device(self, address: str):
         """尝试重连设备"""
         if address in self._reconnecting:
@@ -426,13 +434,15 @@ class DeviceConnectionManager:
 
         device_info = self._wifi_devices[address]
 
-        # 检查重连尝试次数
+        # 检查重连尝试次数 - 达到上限后重置计数器继续尝试，但等待更长时间
         if device_info["reconnect_attempts"] >= self.MAX_RECONNECT_ATTEMPTS:
-            logger.warning(f"设备 {address} 重连尝试次数已达上限，暂停重连")
-            device_info["status"] = "failed"
+            logger.info(f"设备 {address} 重连尝试次数已达上限，等待 {self.FAILED_RECONNECT_INTERVAL}s 后重置计数器继续尝试")
+            device_info["status"] = "waiting"
+            device_info["reconnect_attempts"] = 0
             if self._on_status_change:
-                self._on_status_change(address, "disconnected", "failed")
-            return
+                self._on_status_change(address, "disconnected", "waiting")
+            # 等待较长时间后继续
+            await asyncio.sleep(self.FAILED_RECONNECT_INTERVAL)
 
         self._reconnecting.add(address)
         device_info["status"] = "reconnecting"
@@ -458,31 +468,35 @@ class DeviceConnectionManager:
                 if self._on_status_change:
                     self._on_status_change(address, "reconnecting", "connected")
             else:
-                # 首次连接失败，尝试 kill-server 重置 ADB
-                logger.warning(f"设备 {address} 连接失败: {output.strip()}，尝试重置 ADB server")
-                await run_adb("kill-server")
-                await asyncio.sleep(2)
-                await run_adb("start-server")
-                await asyncio.sleep(1)
+                # 连接失败，只在本地 ADB server 模式下尝试重置
+                if not self._is_remote_adb_server():
+                    logger.warning(f"设备 {address} 连接失败: {output.strip()}，尝试重置本地 ADB server")
+                    await run_adb("kill-server")
+                    await asyncio.sleep(2)
+                    await run_adb("start-server")
+                    await asyncio.sleep(1)
 
-                # 再次尝试连接
-                stdout, stderr = await run_adb("connect", address)
-                output = stdout.decode() + stderr.decode()
+                    # 再次尝试连接
+                    stdout, stderr = await run_adb("connect", address)
+                    output = stdout.decode() + stderr.decode()
 
-                if "connected" in output.lower() and "cannot" not in output.lower():
-                    logger.info(f"设备 {address} 重连成功（通过重置 ADB server）")
-                    device_info["status"] = "connected"
-                    device_info["last_seen"] = datetime.now()
-                    device_info["reconnect_attempts"] = 0
-                    if self._on_status_change:
-                        self._on_status_change(address, "reconnecting", "connected")
+                    if "connected" in output.lower() and "cannot" not in output.lower():
+                        logger.info(f"设备 {address} 重连成功（通过重置 ADB server）")
+                        device_info["status"] = "connected"
+                        device_info["last_seen"] = datetime.now()
+                        device_info["reconnect_attempts"] = 0
+                        if self._on_status_change:
+                            self._on_status_change(address, "reconnecting", "connected")
+                        return
                 else:
-                    logger.warning(f"设备 {address} 重连失败: {output.strip()}")
-                    device_info["status"] = "disconnected"
+                    logger.warning(f"设备 {address} 连接失败: {output.strip()}（远程 ADB server 模式，跳过重置）")
 
-                    # 延迟后再尝试
-                    if device_info["reconnect_attempts"] < self.MAX_RECONNECT_ATTEMPTS:
-                        await asyncio.sleep(self.RECONNECT_INTERVAL)
+                # 标记为断开，等待下次检查时重试
+                device_info["status"] = "disconnected"
+
+                # 延迟后再尝试
+                if device_info["reconnect_attempts"] < self.MAX_RECONNECT_ATTEMPTS:
+                    await asyncio.sleep(self.RECONNECT_INTERVAL)
         except Exception as e:
             logger.error(f"重连设备 {address} 时出错: {e}")
             device_info["status"] = "disconnected"

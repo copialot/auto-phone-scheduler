@@ -11,9 +11,10 @@ services:
     environment:
       - DATABASE_URL=sqlite+aiosqlite:///./data/scheduler.db
       - RECORDINGS_DIR=/app/recordings
-      - ADB_SERVER_SOCKET=tcp:host.docker.internal:5037  # 连接宿主机 ADB server
-    extra_hosts:
-      - "host.docker.internal:host-gateway"  # Linux 需要此配置
+      # 纯 WiFi 设备可以不设置 ADB_SERVER_SOCKET，使用容器内的 adb server
+      # - ADB_SERVER_SOCKET=tcp:host.docker.internal:5037  # 连接宿主机 ADB server
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"  # Linux 需要此配置
     restart: unless-stopped
 
   frontend:

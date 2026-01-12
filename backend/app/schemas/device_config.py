@@ -7,6 +7,7 @@ class DeviceConfigBase(BaseModel):
     device_serial: str = Field(..., max_length=100)
     wake_enabled: bool = True
     wake_command: str | None = None
+    screen_guard_enabled: bool = False
     unlock_enabled: bool = False
     unlock_type: Literal["swipe", "longpress"] | None = None
     unlock_start_x: int | None = None
@@ -23,6 +24,7 @@ class DeviceConfigCreate(DeviceConfigBase):
 class DeviceConfigUpdate(BaseModel):
     wake_enabled: bool | None = None
     wake_command: str | None = None
+    screen_guard_enabled: bool | None = None
     unlock_enabled: bool | None = None
     unlock_type: Literal["swipe", "longpress"] | None = None
     unlock_start_x: int | None = None
